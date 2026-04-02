@@ -1,0 +1,2 @@
+[alias]
+testit = "run --quiet --package=test-wrapper --"
