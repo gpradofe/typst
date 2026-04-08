@@ -173,9 +173,10 @@ impl Output for PagedDocument {
     }
 
     fn should_stream(&self) -> bool {
-        // Only use streaming for documents large enough to benefit.
-        // The threshold matches SPILL_THRESHOLD in pages/mod.rs.
-        self.pages.len() > 100
+        // Only use streaming Phase 2 re-layout when pages are NOT
+        // already on disk. If Phase 1 spilling moved pages to
+        // DiskPageStore, Phase 2 is redundant (pages already streamed).
+        self.page_store.is_none() && self.pages.len() > 100
     }
 }
 
