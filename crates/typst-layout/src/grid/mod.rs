@@ -8,12 +8,12 @@ pub use self::layouter::GridLayouter;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Packed, Smart, StyleChain};
-use typst_library::introspection::{Location, Locator, SplitLocator, Tag, TagFlags};
+use typst_library::introspection::{CellTagMeta, Location, Locator, SplitLocator, Tag, TagFlags};
 use typst_library::layout::grid::resolve::{Cell, CellSource};
 use std::sync::Arc;
 use typst_library::layout::{
-    Fragment, Frame, FrameItem, FrameParent, GridCell, GridElem, Inherit,
-    Point, Regions,
+    Alignment, Fragment, Frame, FrameItem, FrameParent, GridCell, GridElem, Inherit,
+    Point, Regions, Sides,
 };
 use typst_library::model::{TableCell, TableElem};
 
@@ -44,66 +44,68 @@ pub fn layout_cell(
     let mut locator = locator.split();
     let mut tags = None;
 
-    // Generate tags using Cell.source metadata to avoid cloning the full
-    // Packed<TableCell/GridCell> from cell.body. We build a lightweight
-    // packed cell with only the fields needed for PDF tagging.
+    // Generate tags using compact CellTagMeta instead of allocating a full
+    // Packed<TableCell/GridCell> per cell. CellTagMeta is ~16 bytes inline
+    // vs ~400 bytes heap-allocated per Packed, saving ~38 MB for 100K cells.
     match &cell.source {
         Some(CellSource::Table { cell_x, cell_y, kind }) => {
-            let tag_cell = TableCell::new(Content::default())
-                .with_x(Smart::Custom(*cell_x))
-                .with_y(Smart::Custom(*cell_y))
-                .with_colspan(cell.colspan)
-                .with_rowspan(cell.rowspan)
-                .with_kind(*kind);
-            let mut packed = Packed::new(tag_cell).spanned(cell.source_span);
-            if is_repeated {
-                packed.is_repeated.set(is_repeated);
-            }
-            tags = Some(generate_tags(packed, &mut locator, engine));
+            let meta = CellTagMeta::table(
+                *cell_x, *cell_y, cell.colspan, cell.rowspan, *kind, is_repeated,
+            );
+            tags = Some(generate_cell_tags(meta, cell.source_span, &mut locator, engine));
         }
         Some(CellSource::Grid { cell_x, cell_y }) => {
-            let tag_cell = GridCell::new(Content::default())
-                .with_x(Smart::Custom(*cell_x))
-                .with_y(Smart::Custom(*cell_y))
-                .with_colspan(cell.colspan)
-                .with_rowspan(cell.rowspan);
-            let mut packed = Packed::new(tag_cell).spanned(cell.source_span);
-            if is_repeated {
-                packed.is_repeated.set(is_repeated);
-            }
-            tags = Some(generate_tags(packed, &mut locator, engine));
+            let meta = CellTagMeta::grid(
+                *cell_x, *cell_y, cell.colspan, cell.rowspan, is_repeated,
+            );
+            tags = Some(generate_cell_tags(meta, cell.source_span, &mut locator, engine));
         }
         None => {}
     }
 
     let locator = locator.next(&cell.body.span());
-    let fragment = crate::layout_fragment(engine, &cell.body, locator, styles, regions)?;
+
+    // When apply_inset_align is set, the cell body is raw content without
+    // padded/aligned wrappers. Apply them on-the-fly here so they are
+    // short-lived (freed after layout_fragment returns) instead of being
+    // stored permanently in Cell.body for the entire document lifetime.
+    let body;
+    let layout_body = if cell.apply_inset_align {
+        let mut b = cell.body.clone();
+        let applied_inset = cell.resolved_inset
+            .unwrap_or_default()
+            .map(Option::unwrap_or_default);
+        if applied_inset != Sides::default() {
+            b = b.padded(applied_inset);
+        }
+        if let Smart::Custom(alignment) = cell.resolved_align {
+            b = b.aligned(alignment);
+        }
+        body = b;
+        &body
+    } else {
+        &cell.body
+    };
+    let fragment = crate::layout_fragment(engine, layout_body, locator, styles, regions)?;
 
     // Manually insert tags.
     let mut frames = fragment.into_frames();
-    if let Some((elem, loc, key)) = tags
+    if let Some((loc, key, start_tag)) = tags
         && let Some((first, remainder)) = frames.split_first_mut()
     {
         let flags = TagFlags { introspectable: true, tagged: true };
         if remainder.is_empty() {
-            // Optimization: instead of prepend/push on the existing frame
-            // (which triggers Arc::make_mut deep clone when refcount > 1),
-            // create a wrapper frame with tags + the original as a group.
-            // This avoids cloning the potentially large items Vec.
             if Arc::strong_count(first.items_arc()) > 1 {
-                // Wrap the original frame as a Group to avoid deep-cloning
-                // the items Vec. Use push(Group) directly instead of
-                // push_frame which might inline (triggering clone).
                 let size = first.size();
                 let kind = first.kind();
                 let original = std::mem::replace(first, Frame::new(size, kind));
-                first.push(Point::zero(), FrameItem::Tag(Tag::Start(elem, loc, flags)));
+                first.push(Point::zero(), FrameItem::Tag(start_tag));
                 first.push(Point::zero(), FrameItem::Group(
                     typst_library::layout::GroupItem::new(original)
                 ));
                 first.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
             } else {
-                first.prepend(Point::zero(), FrameItem::Tag(Tag::Start(elem, loc, flags)));
+                first.prepend(Point::zero(), FrameItem::Tag(start_tag));
                 first.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
             }
         } else {
@@ -111,7 +113,7 @@ pub fn layout_cell(
                 frame.set_parent(FrameParent::new(loc, Inherit::Yes));
             }
             frames.first_mut().unwrap().prepend_multiple([
-                (Point::zero(), FrameItem::Tag(Tag::Start(elem, loc, flags))),
+                (Point::zero(), FrameItem::Tag(start_tag)),
                 (Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags))),
             ]);
         }
@@ -120,16 +122,17 @@ pub fn layout_cell(
     Ok(Fragment::frames(frames))
 }
 
-fn generate_tags<T: NativeElement>(
-    cell: Packed<T>,
+/// Generate compact cell tags without allocating Packed<TableCell/GridCell>.
+fn generate_cell_tags(
+    meta: CellTagMeta,
+    span: typst_syntax::Span,
     locator: &mut SplitLocator,
     engine: &mut Engine,
-) -> (Content, Location, u128) {
-    let key = typst_utils::hash128(&cell);
-    let loc = locator.next_location(engine, key, cell.span());
-    // Location is stored on the Tag, not on the Content.
-    // This avoids triggering make_unique (deep clone).
-    (cell.pack(), loc, key)
+) -> (Location, u128, Tag) {
+    let key = typst_utils::hash128(&meta);
+    let loc = locator.next_location(engine, key, span);
+    let flags = TagFlags { introspectable: true, tagged: true };
+    (loc, key, Tag::CellStart(meta, loc, flags))
 }
 
 /// Layout the grid.

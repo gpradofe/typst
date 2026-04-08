@@ -71,7 +71,7 @@ fn check_balanced(doc: &PagedDocument) -> Result<(), &'static str> {
         for (_, item) in frame.items() {
             match item {
                 FrameItem::Tag(tag) => match tag {
-                    Tag::Start(..) => stack.push(tag.location()),
+                    Tag::Start(..) | Tag::CellStart(..) => stack.push(tag.location()),
                     Tag::End(..) => {
                         if stack.pop() != Some(tag.location()) {
                             return Err("tags are unbalanced");

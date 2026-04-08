@@ -4,7 +4,7 @@
 //! can reuse the same conversion code without duplication.
 
 use typst_library::foundations::{Content, Label};
-use typst_library::introspection::{Location, Tag, TagFlags};
+use typst_library::introspection::{CellTagKind, CellTagMeta, Location, Tag, TagFlags};
 use typst_library::layout::*;
 use typst_library::model::Destination;
 use typst_library::text::{Glyph, Lang, Region, TextItem};
@@ -236,6 +236,31 @@ impl FrameConverter {
                     tagged: flags.tagged,
                 },
             ),
+            Tag::CellStart(meta, loc, flags) => {
+                let (kind_id, level, scope) = match meta.kind {
+                    CellTagKind::GridCell => (0, 0, 0),
+                    CellTagKind::TableData => (1, 0, 0),
+                    CellTagKind::TableHeader { level, scope } => (2, level, scope),
+                    CellTagKind::TableFooter => (3, 0, 0),
+                    CellTagKind::Repeated => (4, 0, 0),
+                };
+                STag::CellStart(
+                    SCellTagMeta {
+                        x: meta.x,
+                        y: meta.y,
+                        colspan: meta.colspan,
+                        rowspan: meta.rowspan,
+                        kind: kind_id,
+                        level,
+                        scope,
+                    },
+                    loc.hash(),
+                    STagFlags {
+                        introspectable: flags.introspectable,
+                        tagged: flags.tagged,
+                    },
+                )
+            }
         }
     }
 
@@ -417,6 +442,26 @@ impl FrameConverter {
                     tagged: flags.tagged,
                 },
             ),
+            STag::CellStart(smeta, loc, flags) => {
+                let kind = match smeta.kind {
+                    0 => CellTagKind::GridCell,
+                    1 => CellTagKind::TableData,
+                    2 => CellTagKind::TableHeader { level: smeta.level, scope: smeta.scope },
+                    3 => CellTagKind::TableFooter,
+                    _ => CellTagKind::Repeated,
+                };
+                let meta = CellTagMeta {
+                    x: smeta.x,
+                    y: smeta.y,
+                    colspan: smeta.colspan,
+                    rowspan: smeta.rowspan,
+                    kind,
+                };
+                Tag::CellStart(meta, Location::new(loc), TagFlags {
+                    introspectable: flags.introspectable,
+                    tagged: flags.tagged,
+                })
+            }
         }
     }
 }

@@ -43,3 +43,26 @@ pub fn disable_streaming_mode() {
 pub fn is_streaming_mode() -> bool {
     STREAMING_MODE.load(Ordering::Relaxed)
 }
+
+/// Whether cell memoization bypass is active.
+/// When true, layout functions called during grid cell layout skip
+/// comemo caching. This prevents comemo's internal tracking tree from
+/// growing to ~1 GB+ for large tables (100K+ cells), since each cell
+/// layout is unique and cache hits are essentially 0%.
+/// The grid layouter manages its own simple cell cache instead.
+static CELL_MEMOIZE_BYPASS: AtomicBool = AtomicBool::new(false);
+
+/// Enable cell memoization bypass (during grid cell layout).
+pub fn enable_cell_memoize_bypass() {
+    CELL_MEMOIZE_BYPASS.store(true, Ordering::Relaxed);
+}
+
+/// Disable cell memoization bypass (normal layout).
+pub fn disable_cell_memoize_bypass() {
+    CELL_MEMOIZE_BYPASS.store(false, Ordering::Relaxed);
+}
+
+/// Check if cell memoization bypass is active.
+pub fn is_cell_memoize_bypassed() -> bool {
+    CELL_MEMOIZE_BYPASS.load(Ordering::Relaxed)
+}

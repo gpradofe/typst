@@ -475,7 +475,8 @@ pub(crate) fn handle_frame(
                 handle_image(gc, fc, image, *size, surface, *span)?
             }
             FrameItem::Link(dest, size) => handle_link(fc, gc, dest, *size)?,
-            FrameItem::Tag(Tag::Start(_, _, flags)) => {
+            FrameItem::Tag(Tag::Start(_, _, flags))
+            | FrameItem::Tag(Tag::CellStart(_, _, flags)) => {
                 if flags.tagged {
                     tags::handle_start(gc, surface);
                 }

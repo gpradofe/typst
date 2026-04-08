@@ -226,6 +226,20 @@ pub enum STag {
     /// References a Content stored in the TagStore by sequential ID.
     Start(u32, u128, STagFlags), // id, location, flags
     End(u128, u128, STagFlags),  // location, key, flags
+    /// Compact cell tag — stores CellTagMeta inline instead of Content.
+    CellStart(SCellTagMeta, u128, STagFlags), // meta, location, flags
+}
+
+/// Serializable proxy for [`typst_library::introspection::CellTagMeta`].
+#[derive(Serialize, Deserialize)]
+pub struct SCellTagMeta {
+    pub x: u16,
+    pub y: u32,
+    pub colspan: u16,
+    pub rowspan: u16,
+    pub kind: u8, // 0=GridCell, 1=TableData, 2=TableHeader, 3=TableFooter, 4=Repeated
+    pub level: u8,
+    pub scope: u8,
 }
 
 #[derive(Serialize, Deserialize)]

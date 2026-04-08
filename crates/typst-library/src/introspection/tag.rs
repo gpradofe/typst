@@ -1,11 +1,13 @@
 use std::fmt::{self, Debug, Formatter};
+use std::num::NonZeroU32;
 
 use crate::diag::{SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
-    Args, Construct, Content, NativeElement, Packed, Unlabellable, elem,
+    Args, Construct, Content, NativeElement, Packed, Smart, Unlabellable, elem,
 };
 use crate::introspection::Location;
+use crate::pdf::{TableCellKind, TableHeaderScope};
 
 /// Marks the start or end of a locatable element.
 #[derive(Clone, PartialEq, Hash)]
@@ -23,6 +25,10 @@ pub enum Tag {
     /// the two enum variants more balanced in size, keeping a `Tag`'s memory
     /// size down. There are no semantic reasons for this.
     End(Location, u128, TagFlags),
+    /// A compact cell tag that avoids allocating Packed<TableCell/GridCell>.
+    /// Stores cell metadata inline (~16 bytes) instead of a full Content
+    /// (~400 bytes per Packed).
+    CellStart(CellTagMeta, Location, TagFlags),
 }
 
 impl Tag {
@@ -31,6 +37,7 @@ impl Tag {
         match self {
             Tag::Start(_, loc, ..) => *loc,
             Tag::End(loc, ..) => *loc,
+            Tag::CellStart(_, loc, ..) => *loc,
         }
     }
 }
@@ -41,6 +48,115 @@ impl Debug for Tag {
         match self {
             Tag::Start(elem, _, ..) => write!(f, "Start({:?}, {loc:?})", elem.elem().name()),
             Tag::End(..) => write!(f, "End({loc:?})"),
+            Tag::CellStart(meta, _, ..) => write!(f, "CellStart({meta:?}, {loc:?})"),
+        }
+    }
+}
+
+/// Compact metadata for grid/table cell tags.
+///
+/// Avoids allocating a full Packed<TableCell/GridCell> per cell during
+/// layout. At 16 bytes vs ~400 bytes per cell, this saves ~38 MB for
+/// a 100K-cell table.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct CellTagMeta {
+    /// Cell X position in the grid.
+    pub x: u16,
+    /// Cell Y position in the grid.
+    pub y: u32,
+    /// Number of columns this cell spans.
+    pub colspan: u16,
+    /// Number of rows this cell spans.
+    pub rowspan: u16,
+    /// Cell type and kind.
+    pub kind: CellTagKind,
+}
+
+/// The kind of a cell tag.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum CellTagKind {
+    /// A grid cell (non-table).
+    GridCell,
+    /// A table data cell.
+    TableData,
+    /// A table header cell.
+    TableHeader { level: u8, scope: u8 },
+    /// A table footer cell.
+    TableFooter,
+    /// A repeated cell (header/footer repeat, becomes artifact).
+    Repeated,
+}
+
+impl CellTagMeta {
+    /// Create metadata for a table cell.
+    pub fn table(
+        x: usize,
+        y: usize,
+        colspan: std::num::NonZeroUsize,
+        rowspan: std::num::NonZeroUsize,
+        kind: Smart<TableCellKind>,
+        is_repeated: bool,
+    ) -> Self {
+        let cell_kind = if is_repeated {
+            CellTagKind::Repeated
+        } else {
+            match kind {
+                Smart::Custom(TableCellKind::Header(level, scope)) => {
+                    CellTagKind::TableHeader {
+                        level: level.get().min(255) as u8,
+                        scope: scope as u8,
+                    }
+                }
+                Smart::Custom(TableCellKind::Footer) => CellTagKind::TableFooter,
+                Smart::Custom(TableCellKind::Data) | Smart::Auto => CellTagKind::TableData,
+            }
+        };
+        Self {
+            x: x.min(u16::MAX as usize) as u16,
+            y: y.min(u32::MAX as usize) as u32,
+            colspan: colspan.get().min(u16::MAX as usize) as u16,
+            rowspan: rowspan.get().min(u16::MAX as usize) as u16,
+            kind: cell_kind,
+        }
+    }
+
+    /// Create metadata for a grid cell.
+    pub fn grid(
+        x: usize,
+        y: usize,
+        colspan: std::num::NonZeroUsize,
+        rowspan: std::num::NonZeroUsize,
+        is_repeated: bool,
+    ) -> Self {
+        Self {
+            x: x.min(u16::MAX as usize) as u16,
+            y: y.min(u32::MAX as usize) as u32,
+            colspan: colspan.get().min(u16::MAX as usize) as u16,
+            rowspan: rowspan.get().min(u16::MAX as usize) as u16,
+            kind: if is_repeated { CellTagKind::Repeated } else { CellTagKind::GridCell },
+        }
+    }
+
+    /// Whether this is a table cell (not a grid cell).
+    pub fn is_table(&self) -> bool {
+        !matches!(self.kind, CellTagKind::GridCell)
+    }
+
+    /// Convert to Smart<TableCellKind> for PDF tag builder compatibility.
+    pub fn to_table_cell_kind(&self) -> Smart<TableCellKind> {
+        match self.kind {
+            CellTagKind::TableData => Smart::Auto,
+            CellTagKind::TableHeader { level, scope } => {
+                let level = NonZeroU32::new(level as u32).unwrap_or(NonZeroU32::MIN);
+                let scope = match scope {
+                    1 => TableHeaderScope::Column,
+                    2 => TableHeaderScope::Row,
+                    _ => TableHeaderScope::Both,
+                };
+                Smart::Custom(TableCellKind::Header(level, scope))
+            }
+            CellTagKind::TableFooter => Smart::Custom(TableCellKind::Footer),
+            CellTagKind::GridCell | CellTagKind::Repeated => Smart::Auto,
         }
     }
 }

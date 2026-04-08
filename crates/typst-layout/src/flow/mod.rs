@@ -105,7 +105,7 @@ pub fn layout_columns(
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     routines: &Routines,
@@ -213,6 +213,12 @@ pub fn layout_flow<'a>(
         regions.expand.x,
         mode,
     )?;
+
+    // Note: we intentionally do NOT evict comemo caches here.
+    // Evicting after collecting destroys cross-iteration cache hits,
+    // making iteration 2 in multi-iteration documents 6x slower.
+    // Memory is managed instead by: cell memoization bypass for large
+    // grids, periodic grid eviction, and post-layout evict(0).
 
     let mut work = Work::new(&children);
     // Pre-allocate with a reasonable hint: at least backlog size + 1.

@@ -6,7 +6,9 @@
   /K:
     - Tag: TR
       /K:
-        - Tag: TD
+        - Tag: TH
+          /Id: "U1x0y0"
+          /Scope: Column
           /Headers: []
           /BorderStyle: Solid
         - Tag: TH
@@ -22,7 +24,7 @@
         - Tag: TH
           /Id: "U1x0y1"
           /Scope: Row
-          /Headers: []
+          /Headers: ["U1x0y0"]
           /BorderStyle: Solid
           /K:
             - Content: page=0 mcid=2

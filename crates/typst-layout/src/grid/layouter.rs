@@ -321,6 +321,25 @@ impl<'a> GridLayouter<'a> {
 
     /// Determines the columns sizes and then layouts the grid row-by-row.
     pub fn layout(mut self, engine: &mut Engine) -> SourceResult<Fragment> {
+        // Bypass comemo memoization for cell layout in streaming mode
+        // for large grids. During convergence, caches are essential for
+        // fast iteration 2. In streaming mode, caches just waste memory.
+        const CELL_BYPASS_THRESHOLD: usize = 500;
+        let bypass_cell_memoize = self.grid.entries.len() >= CELL_BYPASS_THRESHOLD
+            && typst_library::engine_flags::is_streaming_mode();
+        if bypass_cell_memoize {
+            typst_library::engine_flags::enable_cell_memoize_bypass();
+        }
+        struct CellBypassGuard { active: bool }
+        impl Drop for CellBypassGuard {
+            fn drop(&mut self) {
+                if self.active {
+                    typst_library::engine_flags::disable_cell_memoize_bypass();
+                }
+            }
+        }
+        let _cell_bypass_guard = CellBypassGuard { active: bypass_cell_memoize };
+
         self.measure_columns(engine)?;
 
         if let Some(footer) = &self.grid.footer
@@ -331,20 +350,28 @@ impl<'a> GridLayouter<'a> {
             self.current.initial_after_repeats = self.regions.size.y;
         }
 
-        /// Number of finished pages between comemo evictions.
-        const EVICT_PAGE_INTERVAL: usize = 10;
-
         let mut last_evict_at: usize = 0;
         let eviction_enabled = typst_library::engine_flags::is_layout_eviction_enabled();
+        let streaming = typst_library::engine_flags::is_streaming_mode();
 
         // Only release cell Content after layout for large grids.
         // For small grids (<500 cells), the memory savings are negligible
         // and the unsafe interior mutability can interact badly with
         // orphan prevention, footnote handling, and re-layout scenarios.
+        // Only release cell Content in streaming mode (Phase 2).
+        // During convergence, cell release via unsafe mutation can cause
+        // ~2s slowdown and interact badly with comemo caches.
         const CELL_RELEASE_THRESHOLD: usize = 500;
-        let cell_release_enabled = (eviction_enabled
-            || typst_library::engine_flags::is_streaming_mode())
+        let cell_release_enabled = streaming
             && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
+
+        // Grid frame spilling: only in streaming mode (Phase 2).
+        // During convergence, spilling + deserialization overhead
+        // outweighs savings. In streaming, memoization is disabled
+        // so frames aren't cached by comemo anyway.
+        const FRAME_SPILL_THRESHOLD: usize = 500;
+        let frame_spill_enabled = streaming
+            && self.grid.entries.len() >= FRAME_SPILL_THRESHOLD;
 
         let mut y = 0;
         let mut consecutive_header_count = 0;
@@ -383,25 +410,23 @@ impl<'a> GridLayouter<'a> {
                 self.grid.release_row_cells(y);
             }
 
-            // Periodically evict comemo cache to free per-cell layout
-            // caches — but ONLY during the first convergence iteration.
-            // On subsequent iterations, keeping caches enables fast
-            // validation via cache hits.
-            if eviction_enabled
+            // Periodic eviction during grid layout: free all old cell
+            // layout caches to bound peak memory. evict(0) frees everything,
+            // trading iter2 cache hits for lower peak RSS.
+            // For 10K rows: peak drops ~200 MB, iter2 adds ~2s (still ≤ original).
+            const EVICT_PAGE_INTERVAL: usize = 10;
+            if (eviction_enabled || bypass_cell_memoize)
+                && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD
                 && self.finished.len() >= last_evict_at + EVICT_PAGE_INTERVAL
             {
                 comemo::evict(0);
                 last_evict_at = self.finished.len();
             }
 
-            // Periodically spill finished frames to disk to cap peak memory.
-            // Activates for large grids (>50 finished frames) during the first
-            // convergence iteration or in streaming mode. This reduces peak RAM
-            // from O(total_frames) to O(FRAME_SPILL_THRESHOLD).
-            const FRAME_SPILL_THRESHOLD: usize = 50;
-            if (eviction_enabled || typst_library::engine_flags::is_streaming_mode())
-                && self.finished.len() > FRAME_SPILL_THRESHOLD
-            {
+            // Spill completed frames to disk periodically. Every 10 frames,
+            // write safe frames (not referenced by pending rowspans) to disk
+            // and replace with empty frames.
+            if frame_spill_enabled && self.finished.len() % 10 == 0 {
                 self.spill_safe_frames()?;
             }
 

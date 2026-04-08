@@ -304,9 +304,10 @@ impl ResolvableCell for Packed<TableCell> {
         });
 
         // CONSTRUCT phase: if no user show rules target table.cell, skip
-        // the Packed<TableCell> allocation and apply inset/align directly.
+        // the Packed<TableCell> allocation entirely. Inset/align will be
+        // applied on-the-fly in layout_cell, keeping cell.body lightweight.
         let source_span = self.span();
-        let body = if needs_packed_cell(styles, Element::of::<TableCell>()) {
+        let (body, apply_inset_align) = if needs_packed_cell(styles, Element::of::<TableCell>()) {
             // User show rules exist: keep Packed wrapper for matching.
             let body = self.body.clone();
             let new_cell = TableCell::new(body)
@@ -320,20 +321,11 @@ impl ResolvableCell for Packed<TableCell> {
                 .with_stroke(converted_stroke)
                 .with_breakable(Smart::Custom(breakable))
                 .with_kind(kind);
-            Packed::new(new_cell).spanned(source_span).pack()
+            (Packed::new(new_cell).spanned(source_span).pack(), false)
         } else {
-            // No user show rules: apply inset/align directly (same as show_cell).
-            let mut body = self.body.clone();
-            let applied_inset = resolved_inset
-                .unwrap_or_default()
-                .map(Option::unwrap_or_default);
-            if applied_inset != Sides::default() {
-                body = body.padded(applied_inset);
-            }
-            if let Smart::Custom(alignment) = resolved_align {
-                body = body.aligned(alignment);
-            }
-            body
+            // No user show rules: store raw body. Inset/align applied
+            // on-the-fly in layout_cell from resolved_inset/resolved_align.
+            (self.body.clone(), true)
         };
 
         Cell {
@@ -346,6 +338,7 @@ impl ResolvableCell for Packed<TableCell> {
             breakable,
             resolved_inset,
             resolved_align,
+            apply_inset_align,
             source: Some(CellSource::Table {
                 cell_x: x,
                 cell_y: y,
@@ -440,9 +433,10 @@ impl ResolvableCell for Packed<GridCell> {
         });
 
         // CONSTRUCT phase: if no user show rules target grid.cell, skip
-        // the Packed<GridCell> allocation and apply inset/align directly.
+        // the Packed<GridCell> allocation entirely. Inset/align will be
+        // applied on-the-fly in layout_cell, keeping cell.body lightweight.
         let source_span = self.span();
-        let body = if needs_packed_cell(styles, Element::of::<GridCell>()) {
+        let (body, apply_inset_align) = if needs_packed_cell(styles, Element::of::<GridCell>()) {
             // User show rules exist: keep Packed wrapper for matching.
             let body = self.body.clone();
             let new_cell = GridCell::new(body)
@@ -455,20 +449,11 @@ impl ResolvableCell for Packed<GridCell> {
                 .with_inset(resolved_inset)
                 .with_stroke(converted_stroke)
                 .with_breakable(Smart::Custom(breakable));
-            Packed::new(new_cell).spanned(source_span).pack()
+            (Packed::new(new_cell).spanned(source_span).pack(), false)
         } else {
-            // No user show rules: apply inset/align directly (same as show_cell).
-            let mut body = self.body.clone();
-            let applied_inset = resolved_inset
-                .unwrap_or_default()
-                .map(Option::unwrap_or_default);
-            if applied_inset != Sides::default() {
-                body = body.padded(applied_inset);
-            }
-            if let Smart::Custom(alignment) = resolved_align {
-                body = body.aligned(alignment);
-            }
-            body
+            // No user show rules: store raw body. Inset/align applied
+            // on-the-fly in layout_cell from resolved_inset/resolved_align.
+            (self.body.clone(), true)
         };
 
         Cell {
@@ -481,6 +466,7 @@ impl ResolvableCell for Packed<GridCell> {
             breakable,
             resolved_inset,
             resolved_align,
+            apply_inset_align,
             source: Some(CellSource::Grid {
                 cell_x: x,
                 cell_y: y,
@@ -744,6 +730,10 @@ pub struct Cell {
     /// The resolved alignment for this cell.
     /// Stored here for potential future use; currently still applied via show rule.
     pub resolved_align: Smart<Alignment>,
+    /// Whether layout_cell should apply inset/align on-the-fly from
+    /// resolved_inset/resolved_align. True when no user show rules exist
+    /// (body is raw content, not wrapped in Packed<TableCell/GridCell>).
+    pub apply_inset_align: bool,
     /// Where the cell came from (table or grid), with position info for tags.
     pub source: Option<CellSource>,
     /// The span of the original cell element (for locator/tracing).
@@ -763,6 +753,7 @@ impl Cell {
             breakable: true,
             resolved_inset: Smart::Auto,
             resolved_align: Smart::Auto,
+            apply_inset_align: false,
             source: None,
             source_span: Span::detached(),
         }
