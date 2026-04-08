@@ -238,7 +238,7 @@ fecb35aea7989477183b2554e6b81afa footnote-break-across-pages-float
 ebfadcb28ad190d1f9c5746f93145166 footnote-in-columns
 4d2f7039636813785f802ac53b9be5b8 footnote-in-list
 f4fef945a65bc1e9e17e78e60aceb418 footnote-in-place
-2e53a73c725afe3cfc94a242004f3dec footnote-in-table
+92b3cfd9d7d0f225c2bfb9c5841be732 footnote-in-table
 b878894a83ed11b3062efdfb369f85a8 footnote-invariant
 3f6fb1080dddf4d29edb0f0a021080a4 footnote-multiple-in-one-line
 2549a631a2e315f6f75bc3a9c5dffc22 footnote-nested
@@ -765,7 +765,7 @@ b7fa7f5a5ef1fcdc0acaffec5d6b35ef issue-5719-enum-nested
 a1a4c1ba094a741cb00677a6a6975083 issue-5719-heading-nested
 b0f751c80c588d891f3172c008db4401 issue-5719-list-nested
 fc51612e7e9bd340c302a418704ce5f6 issue-5719-terms-nested
-b8d74ba232642396a1952273d2295524 issue-5723-grid-heading-numbering
+c0870a754a591ab07b2a956105575b22 issue-5723-grid-heading-numbering
 3603154bea37b6f8d4bb323755e6eae2 issue-5760-disable-cjk-latin-spacing-in-raw
 6aa26aedaaef789dc3ac678698f44bc1 issue-5775-cite-order-rtl
 04591578b844b95a79bb590aaed7fd33 issue-5831-par-constructor-args
@@ -794,7 +794,7 @@ cb0560e8b6ce8e66b6f8742aa5218bea issue-6961-tab-crlf-raw-indent
 1c0e0ce6871d806a7ef62be84951175c issue-7103-wrong-state-calculation
 fc1f018aa34fb8536bbc3f186da34359 issue-7113-cjk-latin-spacing-shift
 5cf6982fdd43b0c975bb3e0ed981dd54 issue-7178-svg-fallback-deadlock
-fbd7463048f2f4b0998168654297539b issue-7188-grid-counter-order
+356df4999298ff139c08afb9418d7abb issue-7188-grid-counter-order
 f39daa92c58402d9f88569c3300daa17 issue-7249-multiple-lookup-tables
 2600adb35463980159cb132e07ba829c issue-7292-page-height-auto-margin-zero
 4265ae73539cae37a9521c046fe3cd0c issue-7292-page-size-auto-margin-zero

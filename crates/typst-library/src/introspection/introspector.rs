@@ -524,6 +524,16 @@ impl<P> ElementIntrospectorBuilder<P> {
                     }
                 }
             }
+            Tag::CellStart(_meta, loc, flags) => {
+                // CellStart tags are introspectable like Start tags, but
+                // they have no Content to store. We skip them in the
+                // introspector since cells are not queried by location.
+                // However, we still record the location as seen.
+                if flags.introspectable {
+                    let loc = *loc;
+                    self.seen.insert(loc);
+                }
+            }
             Tag::End(loc, key, flags) => {
                 if flags.introspectable {
                     self.keys.insert(*key, *loc);

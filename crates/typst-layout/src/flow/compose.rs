@@ -361,7 +361,10 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // Search for footnotes.
         let mut notes = vec![];
         for tag in &self.work.tags {
-            let Tag::Start(elem, _, _) = tag else { continue };
+            let Tag::Start(elem, _, _) = tag else {
+                // CellStart tags never contain FootnoteElem, skip them.
+                continue;
+            };
             let Some(note) = elem.to_packed::<FootnoteElem>() else { continue };
             notes.push((Abs::zero(), note.clone()));
         }
@@ -940,6 +943,8 @@ fn find_in_frame_impl<T: NativeElement>(
                     output.push((y, elem.clone()));
                 }
             }
+            // CellStart tags have no Content to unpack, skip them.
+            FrameItem::Tag(Tag::CellStart(..)) => {}
             _ => {}
         }
     }

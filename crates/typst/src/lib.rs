@@ -138,8 +138,15 @@ fn compile_impl<T: Output>(
     loop {
         let _scope = TimingScope::new(ITER_NAMES[history.len()]);
 
-        // Always enable layout-time eviction for memory savings.
-        typst_library::engine_flags::enable_layout_eviction();
+        // Enable layout-time eviction for memory management during layout.
+        // Only in iteration 1: subsequent iterations benefit from comemo
+        // cache hits for cell layouts. Eviction in iteration 2+ would
+        // destroy these caches and force full recomputation.
+        if history.is_empty() {
+            typst_library::engine_flags::enable_layout_eviction();
+        } else {
+            typst_library::engine_flags::disable_layout_eviction();
+        }
         let introspector = history
             .last()
             .map(|doc| doc.introspector())
@@ -246,6 +253,18 @@ fn compile_impl<T: Output>(
 
         history.push(document);
     }
+
+    // Free the evaluator's content tree and convergence history.
+    // After layout, the document holds its own page frames and
+    // no longer references the evaluator's Content objects.
+    drop(content);
+    drop(history);
+
+    // Evict all comemo caches. Layout is complete and the cached
+    // Fragment/Frame data is no longer needed — the document already
+    // has the final page frames. This prevents ~140 MB of stale
+    // cache entries from persisting into PDF export.
+    comemo::evict(0);
 
     // Promote delayed errors.
     let delayed = sink.delayed();

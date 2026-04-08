@@ -756,6 +756,8 @@ impl ManualPageCounter {
                         self.logical = state.first();
                     }
                 }
+                // CellStart tags never contain CounterUpdateElem, skip.
+                FrameItem::Tag(Tag::CellStart(..)) => {}
                 _ => {}
             }
         }

@@ -76,8 +76,8 @@ impl DiskFrameStore {
         let mut reader = io::BufReader::new(self.file.reopen()?);
         let offset = self.offsets[index];
 
-        // Seek to the frame's offset
-        io::copy(&mut reader.by_ref().take(offset), &mut io::sink())?;
+        // Seek directly to the frame's offset (O(1) instead of O(n))
+        reader.seek(io::SeekFrom::Start(offset))?;
 
         // Read length prefix
         let mut len_bytes = [0u8; 8];

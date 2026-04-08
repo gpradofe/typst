@@ -65,6 +65,9 @@ fn traverse(
                 }
             }
 
+            // CellStart tags have no Content/label, skip them in HTML.
+            HtmlNode::Tag(Tag::CellStart(..)) => {}
+
             // When we reach an end tag, we check whether it closes an element
             // that is still in our queue. If so, that means the element
             // produced no nodes and we need to insert an empty span.
@@ -138,6 +141,8 @@ fn traverse_frame(
                     anchors.push((*point, id));
                 }
             }
+            // CellStart tags have no Content/label, skip them.
+            FrameItem::Tag(Tag::CellStart(..)) => {}
             FrameItem::Group(group) => {
                 traverse_frame(work, targets, generator, &group.frame, anchors);
             }
