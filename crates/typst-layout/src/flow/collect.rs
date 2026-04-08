@@ -410,7 +410,7 @@ impl SingleChild<'_> {
 }
 
 /// The cached, internal implementation of [`SingleChild::layout`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
 #[allow(clippy::too_many_arguments)]
 fn layout_single_impl(
     routines: &Routines,
@@ -520,7 +520,7 @@ impl<'a> MultiChild<'a> {
 }
 
 /// The cached, internal implementation of [`MultiChild::layout_full`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
 #[allow(clippy::too_many_arguments)]
 fn layout_multi_impl(
     routines: &Routines,

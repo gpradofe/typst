@@ -20,7 +20,7 @@ use typst_utils::Protected;
 
 use self::collect::{Item, collect};
 use self::finalize::finalize;
-use self::run::{LayoutedPage, layout_blank_page, layout_page_run};
+use self::run::{LayoutedPage, layout_blank_page, layout_page_run, prepare_page_run, create_layouted_page};
 use crate::{Page, PagedDocument, PagedIntrospector, PagedIntrospectorBuilder};
 use crate::page_store::DiskPageStore;
 
@@ -49,7 +49,10 @@ pub fn layout_document(
 }
 
 /// The internal implementation of `layout_document`.
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode())]
+// Disable document-level memoization. The cached PagedDocument holds
+// all page frames, dominating memory. During convergence, the introspector
+// changes every iteration so this cache never hits anyway.
+#[comemo::memoize(enabled = false)]
 #[allow(clippy::too_many_arguments)]
 fn layout_document_impl(
     routines: &Routines,
@@ -96,7 +99,7 @@ pub fn layout_document_for_bundle(
 }
 
 /// The internal implementation of `layout_document_for_bundle`.
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode())]
+#[comemo::memoize(enabled = false)]
 #[allow(clippy::too_many_arguments)]
 fn layout_document_for_bundle_impl(
     routines: &Routines,
@@ -203,26 +206,16 @@ fn layout_pages_streaming<'a>(
     // Slice up the children into logical parts.
     let items = collect(children, locator, styles);
 
-    // Layout the page runs in parallel.
-    let mut runs = engine.parallelize(
-        items.iter().filter_map(|item| match item {
-            Item::Run(children, initial, locator) => {
-                Some((children, initial, locator.relayout()))
-            }
-            _ => None,
-        }),
-        |engine, (children, initial, locator)| {
-            layout_page_run(engine, children, locator, *initial)
-        },
-    );
-
     let mut pages = EcoVec::new();
     let mut tags = vec![];
     let mut counter = ManualPageCounter::new();
     let mut total_pages: usize = 0;
 
     let streaming = typst_library::engine_flags::is_streaming_mode();
-    let first_iteration = typst_library::engine_flags::is_layout_eviction_enabled();
+    // Always use the sequential streaming path. Page-run memoization
+    // is disabled, so the parallel path offers no caching benefit.
+    // Sequential processing allows immediate page spilling to disk.
+    let first_iteration = true;
 
     // Spill pages to disk when: streaming mode (Phase 2), OR during the
     // first convergence iteration for large documents. In both cases we
@@ -242,94 +235,182 @@ fn layout_pages_streaming<'a>(
         None
     };
 
-    for item in &items {
-        match item {
-            Item::Run(..) => {
-                let layouted = runs.next().unwrap()?;
-                let run_page_count = layouted.len();
+    // Shared logic: process a single finalized page (spill or accumulate).
+    let mut process_page = |page: Page,
+                            total_pages: &mut usize,
+                            pages: &mut EcoVec<Page>,
+                            store: &mut Option<DiskPageStore>,
+                            intro_builder: &mut Option<PagedIntrospectorBuilder>,
+                            spilling: &mut bool|
+     -> SourceResult<()> {
+        // Start spilling mid-stream if threshold exceeded.
+        // Spill in both convergence and streaming modes. Page-run
+        // memoization is disabled during convergence (eviction-enabled),
+        // so page frames are not cached by comemo. Spilling frees them.
+        if !*spilling && *total_pages + 1 > SPILL_THRESHOLD {
+            let mut s = DiskPageStore::new()
+                .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
+                .at(typst_syntax::Span::detached())?;
+            let mut ib = PagedIntrospectorBuilder::with_capacity(*total_pages);
+            for (i, p) in pages.iter().enumerate() {
+                ib.discover_page(i, p);
+                s.append_page(p)
+                    .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
+                    .at(typst_syntax::Span::detached())?;
+            }
+            *pages = EcoVec::new();
+            *store = Some(s);
+            *intro_builder = Some(ib);
+            *spilling = true;
+        }
 
-                for layouted in layouted {
+        if *spilling {
+            intro_builder.as_mut().unwrap().discover_page(*total_pages, &page);
+            store
+                .as_mut()
+                .unwrap()
+                .append_page(&page)
+                .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
+                .at(typst_syntax::Span::detached())?;
+        } else {
+            pages.push(page);
+        }
+        *total_pages += 1;
+        Ok(())
+    };
+
+    // For the first convergence iteration, use streaming page-by-page
+    // processing. This avoids accumulating all page frames in memory —
+    // each page is finalized, spilled, and dropped before the next is
+    // produced. For subsequent iterations, use the parallel memoized path.
+    if first_iteration {
+        for item in &items {
+            match item {
+                Item::Run(children, initial, run_locator) => {
+                    let mut prepared = prepare_page_run(
+                        engine,
+                        children,
+                        run_locator.relayout(),
+                        *initial,
+                    )?;
+
+                    // Take the fragment out so we can iterate it while still
+                    // referencing the prepared styles.
+                    let fragment = prepared.take_fragment();
+
+                    // Iterate the Fragment lazily. For large flows, the
+                    // Fragment is disk-backed so each frame is read on demand.
+                    for (page_idx, inner) in fragment.into_iter().enumerate() {
+                        let layouted =
+                            create_layouted_page(engine, inner, &prepared, locator.next(&page_idx))?;
+                        let page =
+                            finalize(engine, &mut counter, &mut tags, layouted)?;
+                        process_page(
+                            page,
+                            &mut total_pages,
+                            &mut pages,
+                            &mut store,
+                            &mut intro_builder,
+                            &mut spilling,
+                        )?;
+                        // page + frame dropped here — memory freed
+                    }
+
+                    // Do NOT evict comemo caches here. Page spilling already
+                    // frees frame memory. Evicting caches would destroy
+                    // cross-iteration cache hits, making iteration 2 a full
+                    // re-layout (~2x slower overall).
+                }
+                Item::Parity(parity, initial, par_locator) => {
+                    if !parity.matches(total_pages) {
+                        continue;
+                    }
+                    let layouted =
+                        layout_blank_page(engine, par_locator.relayout(), *initial)?;
                     let page = finalize(engine, &mut counter, &mut tags, layouted)?;
+                    process_page(
+                        page,
+                        &mut total_pages,
+                        &mut pages,
+                        &mut store,
+                        &mut intro_builder,
+                        &mut spilling,
+                    )?;
+                }
+                Item::Tags(items) => {
+                    tags.extend(
+                        items
+                            .iter()
+                            .filter_map(|(c, _)| c.to_packed::<TagElem>())
+                            .map(|elem| elem.tag.clone()),
+                    );
+                }
+            }
+        }
+    } else {
+        // Subsequent iterations: use parallel memoized page runs.
+        let mut runs = engine.parallelize(
+            items.iter().filter_map(|item| match item {
+                Item::Run(children, initial, locator) => {
+                    Some((children, initial, locator.relayout()))
+                }
+                _ => None,
+            }),
+            |engine, (children, initial, locator)| {
+                layout_page_run(engine, children, locator, *initial)
+            },
+        );
 
-                    // Start spilling mid-stream if this is the first
-                    // convergence iteration and we've exceeded the threshold.
-                    // Move all accumulated pages to disk first.
-                    if !spilling && first_iteration && total_pages + 1 > SPILL_THRESHOLD {
-                        let mut s = DiskPageStore::new()
-                            .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
-                            .at(typst_syntax::Span::detached())?;
-                        let mut ib = PagedIntrospectorBuilder::with_capacity(total_pages);
-                        // Flush accumulated pages to disk.
-                        for (i, p) in pages.iter().enumerate() {
-                            ib.discover_page(i, p);
-                            s.append_page(p)
-                                .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
-                                .at(typst_syntax::Span::detached())?;
-                        }
-                        pages = EcoVec::new();
-                        store = Some(s);
-                        intro_builder = Some(ib);
-                        spilling = true;
+        for item in &items {
+            match item {
+                Item::Run(..) => {
+                    let layouted = runs.next().unwrap()?;
+                    let run_page_count = layouted.len();
+
+                    for layouted in layouted {
+                        let page =
+                            finalize(engine, &mut counter, &mut tags, layouted)?;
+                        process_page(
+                            page,
+                            &mut total_pages,
+                            &mut pages,
+                            &mut store,
+                            &mut intro_builder,
+                            &mut spilling,
+                        )?;
                     }
 
+                    // Evict comemo caches when pages are spilled to disk.
+                    // The cached layout data for spilled pages is no longer
+                    // needed and can be freed to reduce peak memory.
                     if spilling {
-                        intro_builder.as_mut().unwrap()
-                            .discover_page(total_pages, &page);
-                        store.as_mut().unwrap()
-                            .append_page(&page)
-                            .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
-                            .at(typst_syntax::Span::detached())?;
-                    } else {
-                        pages.push(page);
-                    }
-                    total_pages += 1;
-                }
-
-                // Evict comemo caches to free memory from layout data.
-                if streaming {
-                    // In streaming mode, aggressively evict everything after
-                    // every run since memoization is disabled anyway.
-                    comemo::evict(0);
-                } else if first_iteration && spilling {
-                    // First iteration with spilling: evict aggressively since
-                    // there are no cache hits to preserve.
-                    comemo::evict(0);
-                } else if first_iteration {
-                    if run_page_count > SPILL_THRESHOLD
-                        || (total_pages % 50 == 0 && total_pages > 0)
-                    {
-                        comemo::evict(1);
+                        comemo::evict(0);
                     }
                 }
-            }
-            Item::Parity(parity, initial, locator) => {
-                if !parity.matches(total_pages) {
-                    continue;
+                Item::Parity(parity, initial, par_locator) => {
+                    if !parity.matches(total_pages) {
+                        continue;
+                    }
+                    let layouted =
+                        layout_blank_page(engine, par_locator.relayout(), *initial)?;
+                    let page = finalize(engine, &mut counter, &mut tags, layouted)?;
+                    process_page(
+                        page,
+                        &mut total_pages,
+                        &mut pages,
+                        &mut store,
+                        &mut intro_builder,
+                        &mut spilling,
+                    )?;
                 }
-
-                let layouted = layout_blank_page(engine, locator.relayout(), *initial)?;
-                let page = finalize(engine, &mut counter, &mut tags, layouted)?;
-
-                if let Some(ref mut ib) = intro_builder {
-                    ib.discover_page(total_pages, &page);
+                Item::Tags(items) => {
+                    tags.extend(
+                        items
+                            .iter()
+                            .filter_map(|(c, _)| c.to_packed::<TagElem>())
+                            .map(|elem| elem.tag.clone()),
+                    );
                 }
-                if let Some(ref mut s) = store {
-                    s.append_page(&page)
-                        .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
-                        .at(typst_syntax::Span::detached())?;
-                } else {
-                    pages.push(page);
-                }
-
-                total_pages += 1;
-            }
-            Item::Tags(items) => {
-                tags.extend(
-                    items
-                        .iter()
-                        .filter_map(|(c, _)| c.to_packed::<TagElem>())
-                        .map(|elem| elem.tag.clone()),
-                );
             }
         }
     }
@@ -338,7 +419,6 @@ fn layout_pages_streaming<'a>(
     if !tags.is_empty() {
         if store.is_some() {
             // Tags at the end of a spilled document — these are rare.
-            // They won't be in the introspector, but that's acceptable.
         } else if let Some(last) = pages.make_mut().last_mut() {
             let pos = Point::with_y(last.frame.height());
             last.frame

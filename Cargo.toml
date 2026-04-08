@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/*", "docs", "tests", "tests/fuzz", "tests/wrapper"]
 default-members = ["crates/typst-cli"]
+exclude = ["krilla-fork"]
 resolver = "2"
 
 [workspace.package]
@@ -161,9 +162,10 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+debug = 1
 
 [profile.release.package."typst-cli"]
-strip = true
+strip = false
 
 [workspace.lints.clippy]
 blocks_in_conditions = "allow"
@@ -177,3 +179,7 @@ wildcard_in_or_patterns = "allow"
 # See https://github.com/typst/typst/pull/6560#issuecomment-3045393640
 derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
+
+[patch."https://github.com/LaurenzV/krilla"]
+krilla = { path = "krilla-fork/crates/krilla" }
+krilla-svg = { path = "krilla-fork/crates/krilla-svg" }

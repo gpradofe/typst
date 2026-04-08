@@ -24,8 +24,8 @@ use typst_library::diag::{
     At, ExpectInternal, SourceDiagnostic, SourceResult, assert_internal, bail, error,
     panic_internal,
 };
-use typst_library::foundations::{Content, ContextElem};
-use typst_library::introspection::Location;
+use typst_library::foundations::{Content, ContextElem, Packed, Smart};
+use typst_library::introspection::{CellTagKind, CellTagMeta, Location};
 use typst_library::layout::{
     Frame, FrameItem, FrameParent, GridCell, GridElem, GroupItem, HideElem, Inherit,
     PlaceElem, RepeatElem,
@@ -275,6 +275,11 @@ fn visit_frame(tree: &mut TreeBuilder, frame: &Frame) -> SourceResult<()> {
                     visit_start_tag(tree, elem, *loc);
                 }
             }
+            FrameItem::Tag(typst_library::introspection::Tag::CellStart(meta, loc, flags)) => {
+                if flags.tagged {
+                    visit_cell_start_tag(tree, meta, *loc);
+                }
+            }
             FrameItem::Tag(typst_library::introspection::Tag::End(loc, _, flags)) => {
                 if flags.tagged {
                     visit_end_tag(tree, *loc)?;
@@ -353,6 +358,52 @@ fn pop_logical_child(tree: &mut TreeBuilder, parent: FrameParent, stack_idx: usi
 fn visit_start_tag(tree: &mut TreeBuilder, elem: &Content, loc: Location) {
     let group_id = progress_tree_start(tree, elem, loc);
     tree.progressions.push(group_id);
+}
+
+fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Location) {
+    use std::num::NonZeroUsize;
+
+    let kind = if matches!(meta.kind, CellTagKind::Repeated) {
+        // Repeated cells (header/footer repeats) are artifacts.
+        GroupKind::Artifact(ArtifactType::Other)
+    } else if meta.is_table() {
+        // Table cell: construct a temporary Packed<TableCell> with the metadata.
+        let mut cell = Packed::new(
+            TableCell::new(Content::default())
+                .with_x(Smart::Custom(meta.x as usize))
+                .with_y(Smart::Custom(meta.y as usize))
+                .with_colspan(NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN))
+                .with_rowspan(NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN))
+                .with_kind(meta.to_table_cell_kind()),
+        );
+
+        let tag = tree.groups.tags.push(Tag::TD);
+        GroupKind::TableCell(cell, tag, None)
+    } else {
+        // Grid cell: construct a temporary Packed<GridCell>.
+        if !matches!(tree.parent_kind(), GroupKind::Grid(..)) {
+            // If there is no grid parent, this means a grid layouter is used
+            // internally. Use transparent.
+            let group_id = no_progress(tree);
+            tree.progressions.push(group_id);
+            return;
+        }
+        let cell = Packed::new(
+            GridCell::new(Content::default())
+                .with_x(Smart::Custom(meta.x as usize))
+                .with_y(Smart::Custom(meta.y as usize))
+                .with_colspan(NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN))
+                .with_rowspan(NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN)),
+        );
+
+        GroupKind::GridCell(cell, None)
+    };
+
+    let span = Span::detached();
+    let parent = tree.current();
+    let id = tree.groups.new_located(loc, parent, span, kind);
+    push_stack_entry(tree, Some(loc), id);
+    tree.progressions.push(id);
 }
 
 fn visit_end_tag(tree: &mut TreeBuilder, loc: Location) -> SourceResult<()> {
