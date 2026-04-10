@@ -4,7 +4,6 @@ use std::path::Path;
 use parking_lot::RwLock;
 use typst::diag::{SourceDiagnostic, SourceResult, Warned};
 use typst::foundations::{Content, Output, Repr};
-use typst::model::Document;
 use typst_bundle::Bundle;
 use typst_html::HtmlDocument;
 use typst_layout::PagedDocument;
@@ -166,6 +165,11 @@ impl<'a> Runner<'a> {
         // specified or required by paged outputs.
         if self.test.should_run(TestTarget::Paged) {
             let mut doc = self.compile::<PagedDocument>(evaluated.clone());
+            // Reload pages from disk if they were spilled during layout.
+            // Tests need all pages in memory for rendering and comparison.
+            if let Some(d) = &mut doc {
+                d.load_pages_from_store();
+            }
             let errors = custom::check(self.test, &self.world, doc.as_ref());
             if !errors.is_empty() {
                 log!(self, "custom check failed");

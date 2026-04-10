@@ -119,6 +119,9 @@ fn compile_impl<T: Output>(
         .source(main)
         .map_err(|err| hint_invalid_main_file(world, err, main))?;
 
+    // Clear thread-local CellGrid cache from any previous compilation.
+    typst_library::layout::grid::resolve::clear_cellgrid_cache();
+
     // First evaluate the main source file into a module.
     let content = typst_eval::eval(
         &ROUTINES,
@@ -129,6 +132,13 @@ fn compile_impl<T: Output>(
         &main,
     )?
     .content();
+
+    // Evict stale evaluation caches to free comemo's accelerator table
+    // (~118 MB for large documents). The evaluation result is already
+    // extracted into `content`, so nothing needed is lost.
+    comemo::evict(0);
+
+
 
     let mut history: ArrayVec<T, { MAX_ITERS - 1 }> = ArrayVec::new();
     let mut document: T;
@@ -147,6 +157,12 @@ fn compile_impl<T: Output>(
         } else {
             typst_library::engine_flags::disable_layout_eviction();
         }
+        // Reset cumulative grid entry counter, table-level bypass, and
+        // table cache budget for each iteration.
+        typst_library::engine_flags::reset_grid_entries();
+        typst_library::engine_flags::disable_table_level_bypass();
+        typst_library::engine_flags::reset_table_cache_budget();
+        typst_layout::reset_shared_output_store();
         let introspector = history
             .last()
             .map(|doc| doc.introspector())

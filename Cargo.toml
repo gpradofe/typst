@@ -51,7 +51,7 @@ clap_mangen = "0.2.10"
 codespan-reporting = "0.11"
 codex = { git = "https://github.com/typst/codex", rev = "231b9d5" }
 color-print = "0.3.6"
-comemo = "0.5.1"
+comemo = { path = "comemo-local" }
 csv = "1"
 ctrlc = "3.4.1"
 dhat = "0.3"
@@ -183,3 +183,6 @@ disallowed_methods = "warn"
 [patch."https://github.com/LaurenzV/krilla"]
 krilla = { path = "krilla-fork/crates/krilla" }
 krilla-svg = { path = "krilla-fork/crates/krilla-svg" }
+
+[patch.crates-io]
+comemo = { path = "comemo-local" }

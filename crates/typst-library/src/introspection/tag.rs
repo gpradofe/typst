@@ -46,9 +46,9 @@ impl Debug for Tag {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let loc = self.location();
         match self {
-            Tag::Start(elem, _, ..) => write!(f, "Start({:?}, {loc:?})", elem.elem().name()),
+            Tag::Start(elem, ..) => write!(f, "Start({:?}, {loc:?})", elem.elem().name()),
             Tag::End(..) => write!(f, "End({loc:?})"),
-            Tag::CellStart(meta, _, ..) => write!(f, "CellStart({meta:?}, {loc:?})"),
+            Tag::CellStart(meta, ..) => write!(f, "CellStart({meta:?}, {loc:?})"),
         }
     }
 }

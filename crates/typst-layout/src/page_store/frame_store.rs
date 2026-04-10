@@ -44,7 +44,7 @@ impl DiskFrameStore {
     pub fn append_frame(&mut self, frame: &Frame) -> io::Result<()> {
         let sframe = self.converter.convert_frame(frame);
         let bytes = bincode::serialize(&sframe)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let file = self.file.as_file_mut();
         file.seek(io::SeekFrom::End(0))?;
@@ -177,5 +177,180 @@ impl Iterator for SequentialFrameIterator<'_> {
 
         self.index += 1;
         Some(result)
+    }
+}
+
+// --- MemoryFrameStore: in-memory serialized frame store ---
+
+/// An in-memory store for serialized frames. Like DiskFrameStore but stores
+/// serialized data in a Vec<u8> instead of a temp file, avoiding file I/O.
+/// Useful for small-to-medium tables where disk I/O overhead exceeds the
+/// cost of keeping serialized data in memory.
+pub struct MemoryFrameStore {
+    /// Serialized frame data.
+    data: Vec<u8>,
+    /// Number of frames stored.
+    frame_count: usize,
+    /// Byte offsets of each frame in the data buffer.
+    offsets: Vec<u64>,
+    /// Shared frame converter.
+    converter: FrameConverter,
+}
+
+impl Default for MemoryFrameStore {
+    fn default() -> Self {
+        MemoryFrameStore {
+            data: Vec::new(),
+            frame_count: 0,
+            offsets: Vec::new(),
+            converter: FrameConverter::new(),
+        }
+    }
+}
+
+impl MemoryFrameStore {
+    /// Creates a new empty in-memory store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends a single frame to the store.
+    pub fn append_frame(&mut self, frame: &Frame) -> io::Result<()> {
+        let sframe = self.converter.convert_frame(frame);
+        let bytes = bincode::serialize(&sframe)
+            .map_err(io::Error::other)?;
+
+        let offset = self.data.len() as u64;
+        self.offsets.push(offset);
+
+        let len = bytes.len() as u64;
+        self.data.extend_from_slice(&len.to_le_bytes());
+        self.data.extend_from_slice(&bytes);
+
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Returns the number of frames in the store.
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
+    /// Reads a single frame back from the buffer.
+    pub fn read_frame(&self, index: usize) -> io::Result<Frame> {
+        if index >= self.frame_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "frame index out of range",
+            ));
+        }
+
+        let offset = self.offsets[index] as usize;
+        let len_bytes: [u8; 8] = self.data[offset..offset + 8]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad length"))?;
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        let frame_data = &self.data[offset + 8..offset + 8 + len];
+        let sframe: SFrame = bincode::deserialize(frame_data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        Ok(self.converter.reconstruct_frame(sframe))
+    }
+}
+
+/// Thread-safe wrapper around MemoryFrameStore that implements FrameSource.
+pub struct SyncMemoryFrameStore {
+    inner: MemoryFrameStore,
+    frame_count: usize,
+}
+
+impl SyncMemoryFrameStore {
+    /// Wrap a MemoryFrameStore for use as a FrameSource.
+    pub fn new(store: MemoryFrameStore) -> Self {
+        let count = store.frame_count();
+        SyncMemoryFrameStore {
+            inner: store,
+            frame_count: count,
+        }
+    }
+
+    /// Convert to an Arc<dyn FrameSource> for Fragment.
+    pub fn into_source(self) -> Arc<dyn FrameSource> {
+        Arc::new(self)
+    }
+}
+
+impl FrameSource for SyncMemoryFrameStore {
+    fn len(&self) -> usize {
+        self.frame_count
+    }
+
+    fn read_frame(&self, index: usize) -> io::Result<Frame> {
+        self.inner.read_frame(index)
+    }
+}
+
+// --- SharedDiskStore: a single disk file shared across multiple grid layouts ---
+
+/// A shared disk store that multiple grid layouts can write to.
+/// Each grid writes rendered frames and records a subrange.
+/// Uses a single temp file to avoid per-table file creation overhead.
+pub struct SharedDiskStore {
+    /// The underlying disk store (single temp file).
+    store: DiskFrameStore,
+}
+
+impl SharedDiskStore {
+    /// Creates a new shared store.
+    pub fn new() -> io::Result<Self> {
+        Ok(SharedDiskStore { store: DiskFrameStore::new()? })
+    }
+
+    /// Appends a frame and returns its global index.
+    pub fn append_frame(&mut self, frame: &Frame) -> io::Result<usize> {
+        let index = self.store.frame_count();
+        self.store.append_frame(frame)?;
+        Ok(index)
+    }
+
+    /// Reads a frame by global index.
+    pub fn read_frame(&self, index: usize) -> io::Result<Frame> {
+        self.store.read_frame(index)
+    }
+}
+
+/// A FrameSource that reads from a subrange of a SharedDiskStore.
+pub struct SubrangeFrameSource {
+    store: Arc<Mutex<SharedDiskStore>>,
+    start: usize,
+    count: usize,
+}
+
+impl SubrangeFrameSource {
+    /// Create a new subrange source.
+    pub fn new(store: Arc<Mutex<SharedDiskStore>>, start: usize, count: usize) -> Self {
+        SubrangeFrameSource { store, start, count }
+    }
+
+    /// Convert to an Arc<dyn FrameSource>.
+    pub fn into_source(self) -> Arc<dyn FrameSource> {
+        Arc::new(self)
+    }
+}
+
+impl FrameSource for SubrangeFrameSource {
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    fn read_frame(&self, index: usize) -> io::Result<Frame> {
+        if index >= self.count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "subrange frame index out of range",
+            ));
+        }
+        self.store.lock().unwrap().read_frame(self.start + index)
     }
 }

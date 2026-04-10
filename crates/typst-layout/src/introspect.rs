@@ -8,9 +8,9 @@ use typst_library::diag::StrResult;
 use typst_library::foundations::{Content, Label, Selector};
 use typst_library::introspection::{
     DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, Introspector,
-    Location, PagedPosition,
+    Location, PagedPosition, Tag,
 };
-use typst_library::layout::{Frame, FrameItem, Point, Transform};
+use typst_library::layout::{Abs, Frame, FrameItem, Point, Transform};
 use typst_library::model::{Destination, Numbering};
 use typst_syntax::VirtualPath;
 use typst_utils::NonZeroExt;
@@ -61,6 +61,7 @@ impl PagedIntrospector {
     pub fn frame_link_targets(&self) -> &FxHashSet<Location> {
         &self.frame_link_targets
     }
+
 }
 
 impl Introspector for PagedIntrospector {
@@ -188,20 +189,16 @@ impl PagedIntrospectorBuilder {
         }
     }
 
-    /// Build a complete introspector with all acceleration structures from a
-    /// list of top-level pairs.
-    fn finish(
-        self,
-        pages: NonZeroUsize,
-        page_numberings: Vec<Option<Numbering>>,
-        page_supplements: Vec<Content>,
-    ) -> PagedIntrospector {
-        PagedIntrospector {
-            elements: self.elements.finalize(),
-            frame_link_targets: self.frame_link_targets,
-            pages,
-            page_numberings,
-            page_supplements,
+    /// Discovers remaining tags that arrive after all pages have been produced.
+    /// These tags are logically at the bottom of the last page.
+    pub fn discover_remaining_tags(&mut self, page_index: usize, tags: &[Tag], page_height: Abs) {
+        let nr = NonZeroUsize::new(1 + page_index).unwrap();
+        let pos = PagedPosition {
+            page: nr,
+            point: Point::with_y(page_height),
+        };
+        for tag in tags {
+            self.elements.discover_tag(tag, pos);
         }
     }
 

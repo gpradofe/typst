@@ -8,6 +8,10 @@ use crate::layout::Frame;
 pub trait FrameSource: Send + Sync {
     /// Number of frames available.
     fn len(&self) -> usize;
+    /// Whether the source contains no frames.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Read frame at the given index.
     fn read_frame(&self, index: usize) -> std::io::Result<Frame>;
 }
@@ -137,7 +141,7 @@ impl Fragment {
     pub fn has_any_non_empty(&self) -> bool {
         match &self.0 {
             FragmentInner::Memory(frames) => frames.iter().any(|f| !f.is_empty()),
-            FragmentInner::External(source) => source.len() > 0,
+            FragmentInner::External(source) => !source.is_empty(),
         }
     }
 
@@ -178,10 +182,10 @@ impl Fragment {
     /// Replace a frame at the given index with an empty placeholder.
     /// Only works for in-memory fragments. For disk-backed, this is a no-op.
     pub fn clear_frame(&mut self, index: usize) {
-        if let FragmentInner::Memory(frames) = &mut self.0 {
-            if index < frames.len() {
-                frames[index] = Frame::soft(crate::layout::Size::zero());
-            }
+        if let FragmentInner::Memory(frames) = &mut self.0
+            && index < frames.len()
+        {
+            frames[index] = Frame::soft(crate::layout::Size::zero());
         }
     }
 }

@@ -16,12 +16,16 @@ use typst_library::introspection::{
 use typst_library::layout::{FrameItem, Point};
 use typst_library::model::DocumentInfo;
 use typst_library::routines::{Arenas, Pair, RealizationKind, Routines};
-use typst_utils::Protected;
+use typst_utils::{Numeric, Protected};
+
+use typst_library::foundations::Resolve;
+use typst_library::layout::{Abs, ColumnsElem, PageElem, Regions};
 
 use self::collect::{Item, collect};
 use self::finalize::finalize;
-use self::run::{LayoutedPage, layout_blank_page, layout_page_run, prepare_page_run, create_layouted_page};
+use self::run::{LayoutedPage, layout_blank_page, layout_page_run, prepare_page_run_no_fragment, create_layouted_page};
 use crate::{Page, PagedDocument, PagedIntrospector, PagedIntrospectorBuilder};
+use crate::flow::{FlowMode, layout_flow_streaming};
 use crate::page_store::DiskPageStore;
 
 /// Layout content into a document.
@@ -188,7 +192,8 @@ fn layout_document_common(
 
 /// Page count threshold above which pages are spilled to disk during layout.
 /// Below this, all pages are kept in memory (current behavior).
-const SPILL_THRESHOLD: usize = 100;
+/// Lower values reduce peak RSS but increase disk I/O.
+const SPILL_THRESHOLD: usize = 25;
 
 /// Layout pages with streaming disk spill for large documents.
 ///
@@ -212,10 +217,12 @@ fn layout_pages_streaming<'a>(
     let mut total_pages: usize = 0;
 
     let streaming = typst_library::engine_flags::is_streaming_mode();
-    // Always use the sequential streaming path. Page-run memoization
-    // is disabled, so the parallel path offers no caching benefit.
-    // Sequential processing allows immediate page spilling to disk.
-    let first_iteration = true;
+    // Use streaming path only when streaming mode is active (Phase 2).
+    // During convergence, use the batched path for better performance
+    // (avoids per-page callback overhead, DiskPageStore serialization,
+    // and incremental introspector building). Page spilling handles
+    // memory bounding for large documents via SPILL_THRESHOLD.
+    let first_iteration = streaming;
 
     // Spill pages to disk when: streaming mode (Phase 2), OR during the
     // first convergence iteration for large documents. In both cases we
@@ -236,7 +243,7 @@ fn layout_pages_streaming<'a>(
     };
 
     // Shared logic: process a single finalized page (spill or accumulate).
-    let mut process_page = |page: Page,
+    let process_page = |page: Page,
                             total_pages: &mut usize,
                             pages: &mut EcoVec<Page>,
                             store: &mut Option<DiskPageStore>,
@@ -245,8 +252,8 @@ fn layout_pages_streaming<'a>(
      -> SourceResult<()> {
         // Start spilling mid-stream if threshold exceeded.
         // Spill in both convergence and streaming modes. Page-run
-        // memoization is disabled during convergence (eviction-enabled),
-        // so page frames are not cached by comemo. Spilling frees them.
+        // memoization is disabled during convergence, so page frames
+        // are not cached by comemo. Spilling frees them.
         if !*spilling && *total_pages + 1 > SPILL_THRESHOLD {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
@@ -287,39 +294,53 @@ fn layout_pages_streaming<'a>(
         for item in &items {
             match item {
                 Item::Run(children, initial, run_locator) => {
-                    let mut prepared = prepare_page_run(
+                    // Prepare page styles without performing flow layout.
+                    let prepared = prepare_page_run_no_fragment(
                         engine,
                         children,
-                        run_locator.relayout(),
                         *initial,
+                    );
+
+                    // Compute content area from page size and margins.
+                    let area = prepared.page_size - prepared.margin.sum_by_axis();
+                    let styles = StyleChain::new(&prepared.styles);
+
+                    // Use streaming flow layout: each page frame is composed,
+                    // processed (finalized + spilled), and dropped before the
+                    // next is composed. This avoids holding all ~500 page
+                    // frames simultaneously, saving ~160 MB of peak RAM.
+                    let flow_loc = run_locator.relayout();
+                    let mut flow_split = flow_loc.split();
+                    let mut page_idx = 0usize;
+                    layout_flow_streaming(
+                        engine,
+                        children,
+                        &mut flow_split,
+                        styles,
+                        Regions::repeat(area, area.map(Abs::is_finite)),
+                        styles.get(PageElem::columns),
+                        styles.get(ColumnsElem::gutter).resolve(styles),
+                        FlowMode::Root,
+                        &mut |engine, frame| {
+                            let layouted = create_layouted_page(
+                                engine, frame, &prepared,
+                                locator.next(&page_idx),
+                            )?;
+                            let page = finalize(
+                                engine, &mut counter, &mut tags, layouted,
+                            )?;
+                            process_page(
+                                page,
+                                &mut total_pages,
+                                &mut pages,
+                                &mut store,
+                                &mut intro_builder,
+                                &mut spilling,
+                            )?;
+                            page_idx += 1;
+                            Ok(())
+                        },
                     )?;
-
-                    // Take the fragment out so we can iterate it while still
-                    // referencing the prepared styles.
-                    let fragment = prepared.take_fragment();
-
-                    // Iterate the Fragment lazily. For large flows, the
-                    // Fragment is disk-backed so each frame is read on demand.
-                    for (page_idx, inner) in fragment.into_iter().enumerate() {
-                        let layouted =
-                            create_layouted_page(engine, inner, &prepared, locator.next(&page_idx))?;
-                        let page =
-                            finalize(engine, &mut counter, &mut tags, layouted)?;
-                        process_page(
-                            page,
-                            &mut total_pages,
-                            &mut pages,
-                            &mut store,
-                            &mut intro_builder,
-                            &mut spilling,
-                        )?;
-                        // page + frame dropped here — memory freed
-                    }
-
-                    // Do NOT evict comemo caches here. Page spilling already
-                    // frees frame memory. Evicting caches would destroy
-                    // cross-iteration cache hits, making iteration 2 a full
-                    // re-layout (~2x slower overall).
                 }
                 Item::Parity(parity, initial, par_locator) => {
                     if !parity.matches(total_pages) {
@@ -365,8 +386,6 @@ fn layout_pages_streaming<'a>(
             match item {
                 Item::Run(..) => {
                     let layouted = runs.next().unwrap()?;
-                    let run_page_count = layouted.len();
-
                     for layouted in layouted {
                         let page =
                             finalize(engine, &mut counter, &mut tags, layouted)?;
@@ -380,10 +399,10 @@ fn layout_pages_streaming<'a>(
                         )?;
                     }
 
-                    // Evict comemo caches when pages are spilled to disk.
-                    // The cached layout data for spilled pages is no longer
-                    // needed and can be freed to reduce peak memory.
-                    if spilling {
+                    // Evict comemo caches when pages are spilled in
+                    // streaming mode. During convergence, caches are
+                    // needed for iter2 cache hits.
+                    if spilling && streaming {
                         comemo::evict(0);
                     }
                 }
@@ -415,10 +434,32 @@ fn layout_pages_streaming<'a>(
         }
     }
 
+    // Flush buffered writes before any reads from the store.
+    if let Some(s) = store.as_mut() {
+        s.flush_writer()
+            .map_err(|e| ecow::eco_format!("disk store flush failed: {e}"))
+            .at(typst_syntax::Span::detached())?;
+    }
+
     // Add remaining tags to the last page.
     if !tags.is_empty() {
-        if store.is_some() {
-            // Tags at the end of a spilled document — these are rare.
+        if let Some(s) = store.as_mut() {
+            // Discover remaining tags in the introspector before finishing.
+            if let Some(ib) = intro_builder.as_mut() {
+                // Use height of last page for tag position. We need to read
+                // it from the store since pages vec is empty when spilling.
+                let page_height = if total_pages > 0 {
+                    // Read last page just for its height, then drop it.
+                    s.read_page(total_pages - 1)
+                        .map(|p| p.frame.height())
+                        .unwrap_or_default()
+                } else {
+                    Abs::zero()
+                };
+                ib.discover_remaining_tags(total_pages.saturating_sub(1), &tags, page_height);
+            }
+            // Store remaining tags so they're injected when reading the last page.
+            s.set_remaining_tags(tags);
         } else if let Some(last) = pages.make_mut().last_mut() {
             let pos = Point::with_y(last.frame.height());
             last.frame
