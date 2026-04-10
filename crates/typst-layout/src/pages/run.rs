@@ -9,7 +9,7 @@ use typst_library::introspection::{
     Counter, CounterDisplayElem, CounterKey, Introspector, Locator, LocatorLink,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, Binding, ColumnsElem, Dir, Fragment, Frame,
+    Abs, AlignElem, Alignment, Axes, Binding, ColumnsElem, Dir, Frame,
     HAlignment, Length, OuterVAlignment, PageElem, Paper, Region, Regions, Rel, Sides,
     Size, VAlignment,
 };
@@ -20,7 +20,7 @@ use typst_library::text::{LocalName, TextElem};
 use typst_library::visualize::Paint;
 use typst_utils::{Numeric, Protected};
 
-use crate::flow::{FlowMode, layout_flow};
+use crate::flow::{layout_flow, FlowMode};
 
 /// A mostly finished layout for one page. Needs only knowledge of its exact
 /// page number to be finalized into a `Page`. (Because the margins can depend
@@ -72,10 +72,10 @@ pub fn layout_page_run(
 }
 
 /// The internal implementation of `layout_page_run`.
-// Disable page-run memoization entirely. The cached Vec<LayoutedPage>
-// holds all page frames, dominating memory for large documents.
-// Cell-level memoization (layout_fragment_impl, layout_single_impl)
-// provides sufficient iter2 speedup without caching full page frames.
+// Disable page-run memoization. The cached Vec<LayoutedPage> holds all
+// page frames, and the introspector changes between convergence iterations
+// so the cache never hits anyway. Lower-level caches (fragment, table,
+// cell) provide the iter2 speedup.
 #[comemo::memoize(enabled = false)]
 #[allow(clippy::too_many_arguments)]
 fn layout_page_run_impl(
@@ -240,7 +240,6 @@ fn layout_page_run_impl(
 /// Contains the flow Fragment and pre-computed page styles, so
 /// LayoutedPages can be created per-frame without re-computing styles.
 pub struct PreparedPageRun {
-    fragment: Option<Fragment>,
     pub fill: Smart<Option<Paint>>,
     pub numbering: Option<Numbering>,
     pub supplement: Content,
@@ -255,29 +254,19 @@ pub struct PreparedPageRun {
     pub two_sided: bool,
     /// Root styles for the page run, used for marginal layout.
     pub styles: Styles,
+    /// The full page size (after flipping). Used by streaming layout to
+    /// compute the content area without re-resolving page styles.
+    pub page_size: Size,
 }
 
-impl PreparedPageRun {
-    /// Take the fragment out for iteration while keeping the styles alive.
-    pub fn take_fragment(&mut self) -> Fragment {
-        self.fragment.take().expect("fragment already taken")
-    }
-}
-
-/// Prepare a page run for streaming processing. Performs the flow layout
-/// and returns the Fragment along with page styles, without creating
-/// LayoutedPages. The caller can iterate the Fragment lazily and
-/// create LayoutedPages one at a time using `create_layouted_page`.
-pub fn prepare_page_run(
-    engine: &mut Engine,
+/// Prepare a page run's styles and properties WITHOUT performing flow layout.
+/// Returns a PreparedPageRun with fragment=None. The caller is expected to
+/// call `layout_flow_streaming` separately and process frames one at a time.
+pub fn prepare_page_run_no_fragment(
+    _engine: &mut Engine,
     children: &[Pair],
-    locator: Locator,
     initial: StyleChain,
-) -> SourceResult<PreparedPageRun> {
-    let mut locator = locator.split();
-
-    // Determine the page-wide styles (same as layout_page_run_impl).
-    // Keep root_styles owned so we can move it into PreparedPageRun.
+) -> PreparedPageRun {
     let root_styles = Styles::root(children, initial);
     let styles = StyleChain::new(&root_styles);
 
@@ -346,25 +335,11 @@ pub fn prepare_page_run(
         (header.as_ref().unwrap_or(&None), footer.as_ref().unwrap_or(&numbering_marginal))
     };
 
-    // Layout the flow.
-    let area = size - margin.sum_by_axis();
-    let fragment = layout_flow(
-        engine,
-        children,
-        &mut locator,
-        styles,
-        Regions::repeat(area, area.map(Abs::is_finite)),
-        styles.get(PageElem::columns),
-        styles.get(ColumnsElem::gutter).resolve(styles),
-        FlowMode::Root,
-    )?;
-
     let header = header.clone().map(|h| h.artifact(ArtifactKind::Header));
     let footer = footer.clone().map(|f| f.artifact(ArtifactKind::Footer));
     let background = background.clone().map(|b| b.artifact(ArtifactKind::Page));
 
-    Ok(PreparedPageRun {
-        fragment: Some(fragment),
+    PreparedPageRun {
         fill,
         numbering: numbering.clone(),
         supplement,
@@ -378,7 +353,8 @@ pub fn prepare_page_run(
         binding,
         two_sided,
         styles: root_styles,
-    })
+        page_size: size,
+    }
 }
 
 /// Create a LayoutedPage from a single frame and prepared page run config.

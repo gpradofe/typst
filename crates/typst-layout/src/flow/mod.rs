@@ -105,7 +105,7 @@ pub fn layout_columns(
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_table_level_bypassed())]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     routines: &Routines,
@@ -241,6 +241,53 @@ pub fn layout_flow<'a>(
     }
 
     Ok(Fragment::frames(finished))
+}
+
+/// Streaming variant of [`layout_flow`] that yields frames one at a time
+/// via a callback instead of accumulating them in a Fragment.
+///
+/// Each composed frame is passed to `on_frame` immediately, allowing the
+/// caller to process and drop it before the next frame is composed. This
+/// dramatically reduces peak memory for large documents by avoiding
+/// holding all page frames simultaneously.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_flow_streaming<'a>(
+    engine: &mut Engine,
+    children: &[Pair<'a>],
+    locator: &mut SplitLocator<'a>,
+    shared: StyleChain<'a>,
+    mut regions: Regions,
+    columns: NonZeroUsize,
+    column_gutter: Rel<Abs>,
+    mode: FlowMode,
+    on_frame: &mut dyn FnMut(&mut Engine, Frame) -> SourceResult<()>,
+) -> SourceResult<()> {
+    let config = configuration(shared, regions, columns, column_gutter, mode);
+
+    let bump = Bump::new();
+    let children = collect(
+        engine,
+        &bump,
+        children,
+        locator.next(&()),
+        Size::new(config.columns.width, regions.full),
+        regions.expand.x,
+        mode,
+    )?;
+
+    let mut work = Work::new(&children);
+
+    loop {
+        let frame = compose(engine, &mut work, &config, locator.next(&()), regions)?;
+        let done = work.done() && (!regions.expand.y || regions.backlog.is_empty());
+        on_frame(engine, frame)?;
+        if done {
+            break;
+        }
+        regions.next();
+    }
+
+    Ok(())
 }
 
 /// Determine the flow's configuration.

@@ -66,3 +66,75 @@ pub fn disable_cell_memoize_bypass() {
 pub fn is_cell_memoize_bypassed() -> bool {
     CELL_MEMOIZE_BYPASS.load(Ordering::Relaxed)
 }
+
+/// Cumulative grid entry counter. Tracks total entries across all grids
+/// in the current layout pass. Used to trigger table-level memoize bypass
+/// for multi-table documents where individual tables are small (<500 entries)
+/// but collectively grow the comemo cache to ~165 MB of ShapedText.
+static CUMULATIVE_GRID_ENTRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Add entries to the cumulative grid counter. Returns the new total.
+pub fn add_grid_entries(count: usize) -> usize {
+    CUMULATIVE_GRID_ENTRIES.fetch_add(count, Ordering::Relaxed) + count
+}
+
+/// Reset the cumulative grid entry counter (between iterations).
+pub fn reset_grid_entries() {
+    CUMULATIVE_GRID_ENTRIES.store(0, Ordering::Relaxed);
+}
+
+/// Get the current cumulative grid entry count.
+pub fn cumulative_grid_entries() -> usize {
+    CUMULATIVE_GRID_ENTRIES.load(Ordering::Relaxed)
+}
+
+/// Whether table-level layout_fragment_impl should bypass memoization.
+/// Set by GridLayouter when cumulative entries are high, enabling
+/// selective bypass for multi-table documents during iteration 1.
+/// Unlike CELL_MEMOIZE_BYPASS, this is set BEFORE the table's
+/// layout_fragment_impl call (via flow collect or grid layout entry).
+static TABLE_LEVEL_BYPASS: AtomicBool = AtomicBool::new(false);
+
+/// Enable table-level memoize bypass.
+pub fn enable_table_level_bypass() {
+    TABLE_LEVEL_BYPASS.store(true, Ordering::Relaxed);
+}
+
+/// Disable table-level memoize bypass.
+pub fn disable_table_level_bypass() {
+    TABLE_LEVEL_BYPASS.store(false, Ordering::Relaxed);
+}
+
+/// Check if table-level memoize bypass is active.
+pub fn is_table_level_bypassed() -> bool {
+    TABLE_LEVEL_BYPASS.load(Ordering::Relaxed)
+}
+
+/// Counter for layout_multi_impl calls. Used to limit how many table
+/// Fragments comemo caches, reducing peak memory from ~166 MB to ~83 MB.
+/// Each call (cache hit or miss) increments. After the budget is exhausted,
+/// layout_multi_impl runs without memoization, and CachedCells are cleared
+/// after table completion to free the frame data.
+static TABLE_MULTI_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Budget for memoized layout_multi_impl calls. Calls beyond this count
+/// bypass comemo caching. Tuned so that ~130 tables × ~1.5 calls/table
+/// ≈ 195 calls are cached, keeping comemo at ~99 MB instead of ~166 MB.
+/// The remaining ~88 tables are recomputed in iter 2 (~11ms each ≈ 1s).
+const TABLE_CACHE_BUDGET: usize = 100_000;
+
+/// Increment the table layout counter and return true if still under budget.
+/// Used in layout_multi_impl's `enabled` condition. The counter increments
+/// on every call (including cache hits) so the budget is consistent across
+/// iterations.
+pub fn check_table_cache_budget() -> bool {
+    let prev = TABLE_MULTI_CALLS.fetch_add(1, Ordering::Relaxed);
+    prev < TABLE_CACHE_BUDGET
+}
+
+/// Reset the table layout counter (between convergence iterations).
+pub fn reset_table_cache_budget() {
+    TABLE_MULTI_CALLS.store(0, Ordering::Relaxed);
+}

@@ -9,13 +9,14 @@ use super::types::SFontRef;
 /// Registry mapping font references (hash + index) to Font objects.
 /// Built during serialization by collecting all fonts encountered.
 /// Used during deserialization to reconstruct TextItem objects.
+#[derive(Default)]
 pub struct FontRegistry {
     fonts: FxHashMap<(u128, u32), Font>,
 }
 
 impl FontRegistry {
     pub fn new() -> Self {
-        Self { fonts: FxHashMap::default() }
+        Self::default()
     }
 
     pub fn register(&mut self, font: &Font) -> SFontRef {
@@ -32,13 +33,14 @@ impl FontRegistry {
 }
 
 /// Registry mapping image hashes to Image objects.
+#[derive(Default)]
 pub struct ImageRegistry {
     images: FxHashMap<u128, Image>,
 }
 
 impl ImageRegistry {
     pub fn new() -> Self {
-        Self { images: FxHashMap::default() }
+        Self::default()
     }
 
     pub fn register(&mut self, image: &Image) -> u128 {

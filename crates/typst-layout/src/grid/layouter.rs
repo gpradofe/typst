@@ -18,12 +18,75 @@ use typst_library::visualize::Geometry;
 use typst_syntax::Span;
 use typst_utils::Numeric;
 
-use crate::page_store::{DiskFrameStore, SyncDiskFrameStore};
+use crate::page_store::{
+    DiskFrameStore, MemoryFrameStore, SharedDiskStore, SubrangeFrameSource,
+    SyncDiskFrameStore,
+};
+
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
+
+thread_local! {
+    /// Shared disk store for grid output frames during convergence.
+    /// All grids in a single thread write their rendered frames here,
+    /// avoiding per-table temp file creation. Reset between iterations.
+    static SHARED_OUTPUT: RefCell<Option<Arc<Mutex<SharedDiskStore>>>> = const { RefCell::new(None) };
+}
+
+/// Get or create the shared output store for convergence mode.
+fn get_shared_output_store() -> std::io::Result<Arc<Mutex<SharedDiskStore>>> {
+    SHARED_OUTPUT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(store) = borrow.as_ref() {
+            Ok(store.clone())
+        } else {
+            let store = Arc::new(Mutex::new(SharedDiskStore::new()?));
+            *borrow = Some(store.clone());
+            Ok(store)
+        }
+    })
+}
+
+/// Reset the shared output store (called between iterations).
+pub fn reset_shared_output_store() {
+    SHARED_OUTPUT.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
 
 use super::{
     LineSegment, Rowspan, UnbreakableRowGroup, generate_line_segments,
     hline_stroke_at_column, layout_cell, vline_stroke_at_row,
 };
+
+/// Either a disk-backed or in-memory serialized frame store.
+enum FrameStoreKind {
+    Disk(DiskFrameStore),
+    Memory(MemoryFrameStore),
+}
+
+impl FrameStoreKind {
+    fn frame_count(&self) -> usize {
+        match self {
+            Self::Disk(s) => s.frame_count(),
+            Self::Memory(s) => s.frame_count(),
+        }
+    }
+
+    fn append_frame(&mut self, frame: &Frame) -> std::io::Result<()> {
+        match self {
+            Self::Disk(s) => s.append_frame(frame),
+            Self::Memory(s) => s.append_frame(frame),
+        }
+    }
+
+    fn read_frame(&self, index: usize) -> std::io::Result<Frame> {
+        match self {
+            Self::Disk(s) => s.read_frame(index),
+            Self::Memory(s) => s.read_frame(index),
+        }
+    }
+}
 
 /// Performs grid layout.
 pub struct GridLayouter<'a> {
@@ -52,8 +115,9 @@ pub struct GridLayouter<'a> {
     pub(super) current: Current,
     /// Frames for finished regions.
     pub(super) finished: Vec<Frame>,
-    /// Disk store for spilled frames (streaming mode only).
-    frame_store: Option<DiskFrameStore>,
+    /// Store for spilled frames. Uses in-memory serialization during
+    /// convergence (no file I/O overhead) and disk during streaming mode.
+    frame_store: Option<FrameStoreKind>,
     /// Tracks which finished[] indices have been spilled to disk.
     /// spill_map[i] = Some(store_index) means finished[i] was spilled.
     spill_map: Vec<Option<usize>>,
@@ -321,12 +385,13 @@ impl<'a> GridLayouter<'a> {
 
     /// Determines the columns sizes and then layouts the grid row-by-row.
     pub fn layout(mut self, engine: &mut Engine) -> SourceResult<Fragment> {
-        // Bypass comemo memoization for cell layout in streaming mode
-        // for large grids. During convergence, caches are essential for
-        // fast iteration 2. In streaming mode, caches just waste memory.
-        const CELL_BYPASS_THRESHOLD: usize = 500;
-        let bypass_cell_memoize = self.grid.entries.len() >= CELL_BYPASS_THRESHOLD
-            && typst_library::engine_flags::is_streaming_mode();
+        // Bypass cell-level comemo caching for large grids. This prevents
+        // accumulating ~165 MB of paragraph cache entries across many
+        // tables. Table-level caching (layout_multi_impl) provides iter 2
+        // cache hits for budgeted tables; cell caching is unnecessary for
+        // those. For non-budgeted tables, cell caching would waste memory.
+        const CELL_BYPASS_THRESHOLD: usize = 100;
+        let bypass_cell_memoize = self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
         if bypass_cell_memoize {
             typst_library::engine_flags::enable_cell_memoize_bypass();
         }
@@ -354,24 +419,54 @@ impl<'a> GridLayouter<'a> {
         let eviction_enabled = typst_library::engine_flags::is_layout_eviction_enabled();
         let streaming = typst_library::engine_flags::is_streaming_mode();
 
-        // Only release cell Content after layout for large grids.
-        // For small grids (<500 cells), the memory savings are negligible
-        // and the unsafe interior mutability can interact badly with
-        // orphan prevention, footnote handling, and re-layout scenarios.
-        // Only release cell Content in streaming mode (Phase 2).
-        // During convergence, cell release via unsafe mutation can cause
-        // ~2s slowdown and interact badly with comemo caches.
-        const CELL_RELEASE_THRESHOLD: usize = 500;
+        // Track cumulative grid entries for table cache budget.
+        typst_library::engine_flags::add_grid_entries(self.grid.entries.len());
+
+        // Multi-table bypass: when eviction is active and this grid is
+        // large enough, bypass cell-level comemo caching. This prevents
+        // accumulating comemo entries that would be evicted shortly after,
+        // avoiding wasted hashing overhead. Uses a scoped guard so the
+        // bypass only applies to layout_fragment_impl calls within this
+        // grid, not to header/footer marginals that benefit from caching.
+        let table_bypass_active = eviction_enabled
+            && self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
+        if table_bypass_active {
+            typst_library::engine_flags::enable_table_level_bypass();
+        }
+        struct TableBypassGuard { active: bool }
+        impl Drop for TableBypassGuard {
+            fn drop(&mut self) {
+                if self.active {
+                    typst_library::engine_flags::disable_table_level_bypass();
+                }
+            }
+        }
+        let _table_bypass_guard = TableBypassGuard { active: table_bypass_active };
+
+        // Release cell Content after layout for large grids.
+        // Only in streaming mode: during convergence, cell bodies are
+        // part of the Arc<CellGrid> shared across iterations. Mutating
+        // them would corrupt iteration 2's input.
+        const CELL_RELEASE_THRESHOLD: usize = 5000;
         let cell_release_enabled = streaming
             && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
 
-        // Grid frame spilling: only in streaming mode (Phase 2).
-        // During convergence, spilling + deserialization overhead
-        // outweighs savings. In streaming, memoization is disabled
-        // so frames aren't cached by comemo anyway.
-        const FRAME_SPILL_THRESHOLD: usize = 500;
-        let frame_spill_enabled = streaming
-            && self.grid.entries.len() >= FRAME_SPILL_THRESHOLD;
+        // Grid frame spilling: write completed frames to disk for large
+        // grids. Uses a dynamic threshold based on number of finished frames
+        // rather than entry count. Small tables (few pages) stay in-memory;
+        // large tables (many pages) spill to disk to cap peak RSS.
+        // The threshold is lower in convergence mode (10 frames) because
+        // the savings per frame are higher (text shaping data ~0.3 MB/frame).
+        // In streaming mode, always spill (frame data is used once then dropped).
+        // Spill frames for tables with enough entries. During convergence,
+        // uses in-memory serialization (no file I/O) to avoid temp file
+        // overhead. During streaming, uses disk-backed storage.
+        let frame_spill_threshold: usize = if self.grid.entries.len() >= 100 {
+            1
+        } else {
+            usize::MAX // small grids don't spill
+        };
+        let use_disk_store = streaming;
 
         let mut y = 0;
         let mut consecutive_header_count = 0;
@@ -423,11 +518,13 @@ impl<'a> GridLayouter<'a> {
                 last_evict_at = self.finished.len();
             }
 
-            // Spill completed frames to disk periodically. Every 10 frames,
-            // write safe frames (not referenced by pending rowspans) to disk
-            // and replace with empty frames.
-            if frame_spill_enabled && self.finished.len() % 10 == 0 {
-                self.spill_safe_frames()?;
+            // Spill completed frames to disk when the table grows beyond
+            // the threshold. Spill every time a new frame is added after
+            // threshold to keep memory bounded. For multi-table documents
+            // (threshold=2), this ensures each table's Fragment is disk-backed,
+            // keeping the comemo cache small (~200 bytes/table vs ~350 KB).
+            if self.finished.len() > frame_spill_threshold {
+                self.spill_safe_frames(use_disk_store)?;
             }
 
             y += 1;
@@ -449,7 +546,7 @@ impl<'a> GridLayouter<'a> {
         if self.frame_store.is_some() {
             // spill_safe_frames checks min_rowspan_region, which is now
             // self.finished.len() since rowspans Vec was taken (empty).
-            self.spill_safe_frames()?;
+            self.spill_safe_frames(use_disk_store)?;
         }
 
         self.render_fills_strokes()
@@ -531,16 +628,19 @@ impl<'a> GridLayouter<'a> {
         Ok(())
     }
 
-    /// Spill completed frames to disk that are not referenced by pending rowspans.
-    /// Only active in streaming mode.
-    fn spill_safe_frames(&mut self) -> SourceResult<()> {
+    /// Spill completed frames that are not referenced by pending rowspans.
+    fn spill_safe_frames(&mut self, use_disk: bool) -> SourceResult<()> {
         // Initialize store on first call.
         if self.frame_store.is_none() {
-            self.frame_store = Some(
-                DiskFrameStore::new()
-                    .map_err(|e| ecow::eco_format!("frame store init failed: {e}"))
-                    .at(Span::detached())?,
-            );
+            self.frame_store = Some(if use_disk {
+                FrameStoreKind::Disk(
+                    DiskFrameStore::new()
+                        .map_err(|e| ecow::eco_format!("frame store init failed: {e}"))
+                        .at(Span::detached())?,
+                )
+            } else {
+                FrameStoreKind::Memory(MemoryFrameStore::new())
+            });
         }
 
         // Find the minimum first_region across all pending rowspans.
@@ -554,12 +654,10 @@ impl<'a> GridLayouter<'a> {
 
         let store = self.frame_store.as_mut().unwrap();
         for i in 0..min_rowspan_region {
-            // Ensure spill_map is large enough.
             while self.spill_map.len() <= i {
                 self.spill_map.push(None);
             }
 
-            // Skip if already spilled.
             if self.spill_map[i].is_some() {
                 continue;
             }
@@ -611,18 +709,41 @@ impl<'a> GridLayouter<'a> {
         Ok(Fragment::frames(finished))
     }
 
-    /// Streaming variant: reads frames from disk one at a time, renders,
-    /// writes to output store. Returns disk-backed Fragment.
+    /// Streaming variant: reads frames from store one at a time, renders,
+    /// writes to output store. Returns store-backed Fragment.
     fn render_fills_strokes_streaming(mut self) -> SourceResult<Fragment> {
         let mut finished = std::mem::take(&mut self.finished);
         let input_store = self.frame_store.take().unwrap();
         let spill_map = std::mem::take(&mut self.spill_map);
+        let use_disk = matches!(input_store, FrameStoreKind::Disk(_));
 
-        let mut output_store = DiskFrameStore::new()
-            .map_err(|e| ecow::eco_format!("output store init failed: {e}"))
-            .at(Span::detached())?;
+        // For convergence mode (MemoryFrameStore input), use a shared disk
+        // output store to avoid per-table temp file creation overhead while
+        // keeping rendered data on disk instead of in memory.
+        // For streaming mode (DiskFrameStore input), use a dedicated disk store.
+        let shared_output = if !use_disk {
+            Some(
+                get_shared_output_store()
+                    .map_err(|e| ecow::eco_format!("shared output store failed: {e}"))
+                    .at(Span::detached())?,
+            )
+        } else {
+            None
+        };
+
+        let mut dedicated_output = if use_disk {
+            Some(
+                DiskFrameStore::new()
+                    .map_err(|e| ecow::eco_format!("output store init failed: {e}"))
+                    .at(Span::detached())?,
+            )
+        } else {
+            None
+        };
 
         let frame_amount = finished.len();
+        let mut subrange_start = 0usize;
+        let mut subrange_count = 0usize;
 
         for (frame_index, (rows, finished_header_rows)) in self
             .rrows
@@ -635,7 +756,6 @@ impl<'a> GridLayouter<'a> {
             )
             .enumerate()
         {
-            // Get frame: from disk (if spilled) or from finished[].
             let mut frame = if let Some(store_idx) =
                 spill_map.get(frame_index).copied().flatten()
             {
@@ -662,16 +782,35 @@ impl<'a> GridLayouter<'a> {
                 );
             }
 
-            // Write rendered frame to output store and drop it.
-            output_store
-                .append_frame(&frame)
-                .map_err(|e| ecow::eco_format!("frame write failed: {e}"))
-                .at(Span::detached())?;
-            // frame dropped here -- memory freed.
+            if let Some(ref shared) = shared_output {
+                let idx = shared
+                    .lock()
+                    .unwrap()
+                    .append_frame(&frame)
+                    .map_err(|e| ecow::eco_format!("frame write failed: {e}"))
+                    .at(Span::detached())?;
+                if subrange_count == 0 {
+                    subrange_start = idx;
+                }
+                subrange_count += 1;
+            } else if let Some(ref mut store) = dedicated_output {
+                store
+                    .append_frame(&frame)
+                    .map_err(|e| ecow::eco_format!("frame write failed: {e}"))
+                    .at(Span::detached())?;
+            }
         }
 
-        let sync_store = SyncDiskFrameStore::new(output_store);
-        Ok(Fragment::from_source(sync_store.into_source()))
+        // Return a Fragment backed by the appropriate store type.
+        if let Some(shared) = shared_output {
+            let source = SubrangeFrameSource::new(shared, subrange_start, subrange_count);
+            Ok(Fragment::from_source(source.into_source()))
+        } else if let Some(store) = dedicated_output {
+            let sync = SyncDiskFrameStore::new(store);
+            Ok(Fragment::from_source(sync.into_source()))
+        } else {
+            unreachable!()
+        }
     }
 
     /// Render grid lines and cell fills into a single frame.

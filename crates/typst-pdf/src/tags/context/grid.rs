@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 
 use az::SaturatingAs;
 use typst_library::foundations::Packed;
-use typst_library::layout::resolve::CellGrid;
+use typst_library::layout::resolve::{CellGrid, GridMeta};
 use typst_library::layout::{GridCell, GridElem};
 
 use crate::tags::context::GridId;
@@ -32,6 +32,16 @@ impl GridExt for CellGrid {
     }
 }
 
+impl GridExt for GridMeta {
+    fn from_effective(&self, i: usize) -> u32 {
+        if self.has_gutter { (i / 2) as u32 } else { i as u32 }
+    }
+
+    fn to_effective(&self, i: u32) -> usize {
+        if self.has_gutter { 2 * i as usize } else { i as usize }
+    }
+}
+
 #[derive(Debug)]
 pub struct GridCtx {
     group_id: GroupId,
@@ -40,9 +50,9 @@ pub struct GridCtx {
 
 impl GridCtx {
     pub fn new(group_id: GroupId, grid: &Packed<GridElem>) -> Self {
-        let grid = grid.grid.as_ref().unwrap();
-        let width = grid.non_gutter_column_count();
-        let height = grid.non_gutter_row_count();
+        let meta = grid.grid_meta.as_ref().unwrap();
+        let width = meta.non_gutter_column_count();
+        let height = meta.non_gutter_row_count();
         Self { group_id, cells: GridCells::new(width, height) }
     }
 

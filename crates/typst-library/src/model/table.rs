@@ -10,7 +10,8 @@ use crate::foundations::{
     Content, Packed, Smart, StyleChain, Synthesize, cast, elem, scope,
 };
 use crate::introspection::{Locatable, Tagged};
-use crate::layout::resolve::{CellGrid, table_to_cellgrid};
+use crate::foundations::{Target, TargetElem};
+use crate::layout::resolve::{CellGrid, GridMeta, cached_table_cellgrid};
 use crate::layout::{
     Abs, Alignment, Celled, GridCell, GridFooter, GridHLine, GridHeader, GridVLine,
     Length, OuterHAlignment, OuterVAlignment, Rel, Sides, TrackSizings,
@@ -283,6 +284,19 @@ pub struct TableElem {
     #[synthesized]
     pub grid: Arc<CellGrid>,
 
+    /// Compact metadata for PDF tagging. Only stroke/fill/structural data,
+    /// no Content bodies. ~11 MB vs ~42 MB for full CellGrid across 218 tables.
+    #[internal]
+    #[synthesized]
+    pub grid_meta: Arc<GridMeta>,
+
+    /// Cache key computed during synthesize for CellGrid lookup.
+    /// Stored so layout_table can find the same cache entry despite
+    /// materialize() changing the element hash after synthesize.
+    #[internal]
+    #[synthesized]
+    pub grid_cache_key: u128,
+
     /// The contents of the table cells, plus any extra table lines specified
     /// with the [`table.hline`] and [`table.vline`] elements.
     #[variadic]
@@ -313,8 +327,27 @@ impl Synthesize for Packed<TableElem> {
         engine: &mut Engine,
         styles: StyleChain,
     ) -> SourceResult<()> {
-        let grid = table_to_cellgrid(self, engine, styles)?;
-        self.grid = Some(Arc::new(grid));
+        let (grid, cache_key) = cached_table_cellgrid(self, engine, styles)?;
+        // Store cache key so layout_table can find the same cache entry
+        // even after materialize() changes the element hash.
+        self.grid_cache_key = Some(cache_key);
+        if styles.get(TargetElem::target) == Target::Paged {
+            // For paged output: store compact metadata for PDF tagging.
+            let meta = GridMeta::from_cellgrid(&grid);
+            self.grid_meta = Some(Arc::new(meta));
+            // For very large tables (>10K entries), also store the grid Arc.
+            // This prevents layout_table from creating a duplicate CellGrid
+            // via cached_table_cellgrid (which may miss due to different
+            // style hash). Saves ~19 MB for 100K-row single-table documents.
+            // Threshold is high to avoid keeping many CellGrids alive in
+            // multi-table documents where each table is small.
+            if grid.entries.len() >= 10_000 {
+                self.grid = Some(grid);
+            }
+        } else {
+            // For HTML: store full CellGrid (HTML export needs cell bodies).
+            self.grid = Some(grid);
+        }
         Ok(())
     }
 }

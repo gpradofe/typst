@@ -9,7 +9,7 @@ use krilla::tagging::{NaiveRgbColor, Tag, TagKind};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use typst_library::foundations::Packed;
-use typst_library::layout::resolve::{CellGrid, Line, LinePosition};
+use typst_library::layout::resolve::{GridMeta, Line, LinePosition};
 use typst_library::layout::{Abs, Sides};
 use typst_library::model::{TableCell, TableElem};
 use typst_library::pdf::{TableCellKind, TableHeaderScope};
@@ -56,7 +56,7 @@ pub enum StrokePriority {
 
 impl TableCtx {
     pub fn new(group_id: GroupId, table_id: TableId, table: Packed<TableElem>) -> Self {
-        let grid = table.grid.as_ref().unwrap();
+        let grid = table.grid_meta.as_ref().unwrap();
         let width = grid.non_gutter_column_count();
         let height = grid.non_gutter_row_count();
 
@@ -100,12 +100,12 @@ impl TableCtx {
         let y = cell.y.val().unwrap_or_else(|| unreachable!()).saturating_as();
         let rowspan = cell.rowspan.val();
         let colspan = cell.colspan.val();
-        let grid = self.elem.grid.as_deref().unwrap();
+        let meta = self.elem.grid_meta.as_deref().unwrap();
 
         let kind = cell.kind.val().unwrap_or(self.row_kinds[y as usize]);
 
-        let [grid_x, grid_y] = [x, y].map(|i| grid.to_effective(i));
-        let grid_cell = grid.cell(grid_x, grid_y).unwrap();
+        let [grid_x, grid_y] = [x, y].map(|i| meta.to_effective(i));
+        let grid_cell = meta.cell(grid_x, grid_y).unwrap();
         let stroke = grid_cell.stroke.clone().zip(grid_cell.stroke_overridden).map(
             |(stroke, overridden)| {
                 let priority = if overridden {
@@ -154,7 +154,7 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
 
     let width = table_ctx.cells.width();
     let height = table_ctx.cells.height();
-    let grid = table_ctx.elem.grid.as_deref().unwrap();
+    let grid = table_ctx.elem.grid_meta.as_deref().unwrap();
 
     // Only generate row groups such as `THead`, `TFoot`, and `TBody` if
     // there are no rows with mixed cell kinds, and there is at least one
@@ -558,7 +558,7 @@ fn try_resolve_table_stroke(
 }
 
 fn resolve_cell_border_and_background(
-    grid: &CellGrid,
+    grid: &GridMeta,
     parent_border_thickness: Option<f32>,
     parent_border_color: Option<NaiveRgbColor>,
     pos: [u32; 2],
@@ -599,7 +599,8 @@ fn resolve_cell_border_and_background(
 
     let [grid_x, grid_y] = pos.map(|i| grid.to_effective(i));
     let grid_cell = grid.cell(grid_x, grid_y).unwrap();
-    let background_color = grid_cell.fill.as_ref().and_then(util::paint_to_color);
+    let background_color =
+        grid_cell.fill_rgb.map(|[r, g, b]| NaiveRgbColor::new(r, g, b));
     tag.set_background_color(background_color);
 }
 
