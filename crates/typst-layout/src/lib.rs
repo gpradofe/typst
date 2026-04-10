@@ -20,6 +20,7 @@ mod transforms;
 
 pub use self::document::{Page, PagedDocument};
 pub use self::flow::{layout_fragment, layout_frame};
+pub use self::grid::reset_shared_output_store;
 pub use self::introspect::{PagedIntrospector, PagedIntrospectorBuilder};
 pub use self::pages::{layout_document, layout_document_for_bundle};
 pub use self::rules::register;

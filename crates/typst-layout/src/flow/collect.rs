@@ -479,6 +479,11 @@ impl<'a> MultiChild<'a> {
                 backlog: vec![],
                 min_backlog_len: regions.backlog.len(),
             });
+        } else {
+            // Table fully consumed in one region — clear CachedCell to free
+            // frame memory. Same logic as MultiSpill::layout line 645:
+            // once all frames are extracted, the cache is dead weight.
+            self.clear_cache();
         }
 
         Ok((frame, spill))
@@ -517,10 +522,18 @@ impl<'a> MultiChild<'a> {
             fragment.clear_frame(index);
         }
     }
+
+    /// Clear the entire cached cell to free frame memory after a table
+    /// completes. For non-comemo-cached tables, this is the only holder
+    /// of the Fragment data, so clearing frees the ShapedText/TextItem
+    /// memory. For comemo-cached tables, this just decrements Arc refcounts.
+    pub fn clear_cache(&self) {
+        *self.cell.0.borrow_mut() = None;
+    }
 }
 
 /// The cached, internal implementation of [`MultiChild::layout_full`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && typst_library::engine_flags::check_table_cache_budget())]
 #[allow(clippy::too_many_arguments)]
 fn layout_multi_impl(
     routines: &Routines,
@@ -629,6 +642,12 @@ impl MultiSpill<'_, '_> {
         let mut spill = None;
         if frames.len() > 0 {
             spill = Some(self);
+        } else {
+            // Table fully extracted — clear CachedCell to free frame memory.
+            // For non-comemo-cached tables (over budget), this releases the
+            // ShapedText/TextItem data immediately instead of holding it
+            // until the entire flow layout completes.
+            self.multi.clear_cache();
         }
 
         Ok((frame, spill))

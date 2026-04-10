@@ -3,19 +3,19 @@ mod lines;
 mod repeated;
 mod rowspans;
 
-pub use self::layouter::GridLayouter;
+pub use self::layouter::{GridLayouter, reset_shared_output_store};
 
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, NativeElement, Packed, Smart, StyleChain};
+use typst_library::foundations::{Packed, Smart, StyleChain};
 use typst_library::introspection::{CellTagMeta, Location, Locator, SplitLocator, Tag, TagFlags};
-use typst_library::layout::grid::resolve::{Cell, CellSource};
+use typst_library::layout::grid::resolve::{Cell, CellSource, cached_table_cellgrid, cached_grid_cellgrid, cellgrid_by_key};
 use std::sync::Arc;
 use typst_library::layout::{
-    Alignment, Fragment, Frame, FrameItem, FrameParent, GridCell, GridElem, Inherit,
+    Fragment, Frame, FrameItem, FrameParent, GridElem, Inherit,
     Point, Regions, Sides,
 };
-use typst_library::model::{TableCell, TableElem};
+use typst_library::model::TableElem;
 
 use self::layouter::RowPiece;
 use self::lines::{
@@ -73,6 +73,8 @@ pub fn layout_cell(
     let layout_body = if cell.apply_inset_align {
         let mut b = cell.body.clone();
         let applied_inset = cell.resolved_inset
+            .as_deref()
+            .cloned()
             .unwrap_or_default()
             .map(Option::unwrap_or_default);
         if applied_inset != Sides::default() {
@@ -144,8 +146,14 @@ pub fn layout_grid(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Fragment> {
-    let grid = elem.grid.as_ref().unwrap();
-    GridLayouter::new(grid, regions, locator, styles, elem.span()).layout(engine)
+    // Always use the thread-local cache for CellGrid (MAX_CELLGRID_CACHE=30).
+    // The grid is NOT stored on the element to avoid holding all grids in the
+    // Content tree simultaneously (~42 MB for 218-table documents).
+    let grid = match elem.grid.as_ref() {
+        Some(g) => g.clone(),
+        None => cached_grid_cellgrid(elem, engine, styles)?,
+    };
+    GridLayouter::new(&grid, regions, locator, styles, elem.span()).layout(engine)
 }
 
 /// Layout the table.
@@ -157,6 +165,15 @@ pub fn layout_table(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Fragment> {
-    let grid = elem.grid.as_ref().unwrap();
-    GridLayouter::new(grid, regions, locator, styles, elem.span()).layout(engine)
+    // Use stored cache key from synthesize to find the CellGrid in cache.
+    // This avoids recomputation caused by materialize() changing the element
+    // hash between synthesize and layout_table.
+    let grid = match elem.grid.as_ref() {
+        Some(g) => g.clone(),
+        None => match elem.grid_cache_key.as_ref() {
+            Some(&key) => cellgrid_by_key(key, elem, engine, styles)?,
+            None => cached_table_cellgrid(elem, engine, styles)?.0,
+        },
+    };
+    GridLayouter::new(&grid, regions, locator, styles, elem.span()).layout(engine)
 }

@@ -30,4 +30,7 @@ mod frame_store;
 pub use store::DiskPageStore;
 pub use registry::{FontRegistry, ImageRegistry};
 pub use converter::FrameConverter;
-pub use frame_store::{DiskFrameStore, SyncDiskFrameStore};
+pub use frame_store::{
+    DiskFrameStore, MemoryFrameStore, SharedDiskStore, SubrangeFrameSource,
+    SyncDiskFrameStore, SyncMemoryFrameStore,
+};

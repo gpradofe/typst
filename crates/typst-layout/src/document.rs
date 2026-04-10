@@ -106,6 +106,23 @@ impl PagedDocument {
     pub fn take_page_store(&mut self) -> Option<Arc<DiskPageStore>> {
         self.page_store.take()
     }
+
+    /// Loads all pages from the DiskPageStore into memory.
+    /// After this call, `pages()` returns the full set of pages and the
+    /// page store is cleared. This is used by the test runner which needs
+    /// all pages in memory for rendering and comparison.
+    pub fn load_pages_from_store(&mut self) {
+        if self.pages.is_empty()
+            && let Some(store) = &self.page_store
+            && let Ok(iter) = store.pages_iter()
+        {
+            let mut loaded = EcoVec::with_capacity(store.page_count());
+            for page_result in iter.flatten() {
+                loaded.push(page_result);
+            }
+            self.pages = loaded;
+        }
+    }
 }
 
 impl Clone for PagedDocument {
@@ -173,7 +190,8 @@ impl Output for PagedDocument {
     }
 
     fn should_stream(&self) -> bool {
-        // Phase 2 disabled: doubles time without reducing peak RSS.
+        // Phase 2 disabled: peak RSS is set by Phase 1. Phase 2 can't
+        // reduce the OS high-water mark because it runs after Phase 1.
         false
     }
 }
@@ -226,4 +244,5 @@ mod tests {
         fn ensure_send_and_sync<T: Send + Sync>() {}
         ensure_send_and_sync::<PagedDocument>();
     }
+
 }

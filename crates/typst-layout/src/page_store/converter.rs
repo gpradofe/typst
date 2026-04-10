@@ -32,9 +32,8 @@ pub struct FrameConverter {
     pub(super) tilings: Vec<Tiling>,
 }
 
-impl FrameConverter {
-    /// Creates a new empty converter.
-    pub fn new() -> Self {
+impl Default for FrameConverter {
+    fn default() -> Self {
         FrameConverter {
             fonts: FontRegistry::new(),
             images: ImageRegistry::new(),
@@ -42,6 +41,13 @@ impl FrameConverter {
             gradients: Vec::new(),
             tilings: Vec::new(),
         }
+    }
+}
+
+impl FrameConverter {
+    /// Creates a new empty converter.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     // --- Conversion: Frame → SFrame ---
@@ -104,7 +110,7 @@ impl FrameConverter {
                 tx: g.transform.tx.to_raw(),
                 ty: g.transform.ty.to_raw(),
             },
-            clip: g.clip.as_ref().map(|c| convert_curve(c)),
+            clip: g.clip.as_ref().map(convert_curve),
             label: g.label.map(|l| l.resolve().as_str().to_string()),
             parent: g.parent.map(|p| SFrameParent {
                 location: p.location.hash(),

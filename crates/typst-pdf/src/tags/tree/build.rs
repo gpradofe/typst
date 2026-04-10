@@ -32,7 +32,7 @@ use typst_library::layout::{
 };
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    Document, EmphElem, EnumElem, FigureCaption, FigureElem, FootnoteElem, FootnoteEntry,
+    EmphElem, EnumElem, FigureCaption, FigureElem, FootnoteElem, FootnoteEntry,
     HeadingElem, LinkMarker, ListElem, Outlinable, OutlineEntry, ParElem, QuoteElem,
     StrongElem, TableCell, TableElem, TermsElem, TitleElem,
 };
@@ -368,7 +368,7 @@ fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Locatio
         GroupKind::Artifact(ArtifactType::Other)
     } else if meta.is_table() {
         // Table cell: construct a temporary Packed<TableCell> with the metadata.
-        let mut cell = Packed::new(
+        let cell = Packed::new(
             TableCell::new(Content::default())
                 .with_x(Smart::Custom(meta.x as usize))
                 .with_y(Smart::Custom(meta.y as usize))
