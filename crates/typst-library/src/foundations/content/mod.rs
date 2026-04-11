@@ -99,6 +99,13 @@ impl Content {
         self.0.elem()
     }
 
+    /// Returns a pointer-based identity for this content allocation.
+    /// Two Content values backed by the same allocation (e.g., clones)
+    /// return the same value. Cheap O(1) alternative to hashing.
+    pub fn identity(&self) -> usize {
+        self.0.identity()
+    }
+
     /// Get the span of the content.
     pub fn span(&self) -> Span {
         self.0.span()

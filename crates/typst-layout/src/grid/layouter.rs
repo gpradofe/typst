@@ -1322,6 +1322,9 @@ impl<'a> GridLayouter<'a> {
             .map(|(x, _)| x)
             .collect::<Vec<_>>();
 
+        // Minimum number of cells to justify parallelization overhead.
+        const PARALLEL_THRESHOLD: usize = 200;
+
         // Determine size of auto columns by laying out all cells in those
         // columns, measuring them and finding the largest one.
         for (x, &col) in self.grid.cols.iter().enumerate() {
@@ -1329,7 +1332,15 @@ impl<'a> GridLayouter<'a> {
                 continue;
             }
 
-            let mut resolved = Abs::zero();
+            // Collect work items for this column, then measure in parallel
+            // if there are enough cells.
+            let mut work_items: Vec<(
+                &Cell,
+                Abs,       // already_covered_width
+                Regions,   // pod
+                Locator,
+            )> = Vec::new();
+
             for y in 0..self.grid.rows.len() {
                 // We get the parent cell in case this is a merged position.
                 let Some(parent) = self.grid.parent_cell_position(x, y) else {
@@ -1367,13 +1378,6 @@ impl<'a> GridLayouter<'a> {
                         .iter()
                         .all(|x| (parent.x..parent.x + colspan).contains(x))
                 {
-                    // Additionally, as a heuristic, a colspan won't affect the
-                    // size of auto columns if it already spans all fractional
-                    // columns, since those would already expand to provide all
-                    // remaining available after auto column sizing to that
-                    // cell. However, this heuristic is only valid in finite
-                    // regions (pages without 'auto' width), since otherwise
-                    // the fractional columns don't expand at all.
                     continue;
                 }
 
@@ -1388,8 +1392,6 @@ impl<'a> GridLayouter<'a> {
                     .skip(y)
                     .take(rowspan)
                     .try_fold(Abs::zero(), |acc, col| {
-                        // For relative rows, we can already resolve the correct
-                        // base and for auto and fr we could only guess anyway.
                         match col {
                             Sizing::Rel(v) => Some(
                                 acc + v
@@ -1401,36 +1403,53 @@ impl<'a> GridLayouter<'a> {
                     })
                     .unwrap_or_else(|| self.regions.base().y);
 
-                // Don't expand this auto column more than the cell actually
-                // needs. To do this, we check how much the other, previously
-                // resolved columns provide to the cell in terms of width
-                // (if it is a colspan), and subtract this from its expected
-                // width when comparing with other cells in this column. Note
-                // that, since this is the last auto column spanned by this
-                // cell, all other auto columns will already have been resolved
-                // and will be considered.
-                // Only fractional columns will be excluded from this
-                // calculation, which can lead to auto columns being expanded
-                // unnecessarily when cells span both a fractional column and
-                // an auto column. One mitigation for this is the heuristic
-                // used above to not expand the last auto column spanned by a
-                // cell if it spans all fractional columns in a finite region.
                 let already_covered_width = self.cell_spanned_width(cell, parent.x);
 
                 let size = Size::new(available, height);
-                let pod = Region::new(size, Axes::splat(false));
+                let pod: Regions = Region::new(size, Axes::splat(false)).into();
                 let locator = self.cell_locator(parent, 0);
-                let frame = layout_cell(
-                    cell,
-                    engine,
-                    locator,
-                    self.styles,
-                    pod.into(),
-                    self.row_state.is_being_repeated,
-                )?
-                .into_frame();
-                resolved.set_max(frame.width() - already_covered_width);
+
+                work_items.push((cell, already_covered_width, pod, locator));
             }
+
+            let resolved = if work_items.len() >= PARALLEL_THRESHOLD {
+                // Parallel measurement: use engine.parallelize() for large
+                // columns. Each cell measurement is independent.
+                let styles = self.styles;
+                let is_repeated = self.row_state.is_being_repeated;
+                let results: Vec<_> = engine.parallelize(
+                    work_items.into_iter(),
+                    |engine, (cell, covered_width, pod, locator)| {
+                        let result = layout_cell(
+                            cell, engine, locator, styles, pod, is_repeated,
+                        );
+                        result.map(|frag| frag.into_frame().width() - covered_width)
+                    },
+                ).collect();
+
+                // Find max width, propagating errors.
+                let mut max_width = Abs::zero();
+                for result in results {
+                    max_width.set_max(result?);
+                }
+                max_width
+            } else {
+                // Sequential measurement for small columns.
+                let mut max_width = Abs::zero();
+                for (cell, covered_width, pod, locator) in work_items {
+                    let frame = layout_cell(
+                        cell,
+                        engine,
+                        locator,
+                        self.styles,
+                        pod,
+                        self.row_state.is_being_repeated,
+                    )?
+                    .into_frame();
+                    max_width.set_max(frame.width() - covered_width);
+                }
+                max_width
+            };
 
             self.rcols[x] = resolved;
             auto += resolved;
