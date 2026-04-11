@@ -5,12 +5,13 @@ mod rowspans;
 
 pub use self::layouter::{GridLayouter, reset_shared_output_store};
 
+use std::sync::Arc;
+
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, Smart, StyleChain};
 use typst_library::introspection::{CellTagMeta, Location, Locator, SplitLocator, Tag, TagFlags};
 use typst_library::layout::grid::resolve::{Cell, CellSource, cached_table_cellgrid, cached_grid_cellgrid, cellgrid_by_key};
-use std::sync::Arc;
 use typst_library::layout::{
     Fragment, Frame, FrameItem, FrameParent, GridElem, Inherit,
     Point, Regions, Sides,
@@ -22,6 +23,7 @@ use self::lines::{
     LineSegment, generate_line_segments, hline_stroke_at_column, vline_stroke_at_row,
 };
 use self::rowspans::{Rowspan, UnbreakableRowGroup};
+
 
 /// Layout the cell into the given regions.
 ///
@@ -88,10 +90,17 @@ pub fn layout_cell(
     } else {
         &cell.body
     };
+
     let fragment = crate::layout_fragment(engine, layout_body, locator, styles, regions)?;
 
-    // Manually insert tags.
-    let mut frames = fragment.into_frames();
+    Ok(apply_cell_tags(fragment.into_frames(), tags))
+}
+
+/// Apply cell tags to fragment frames.
+fn apply_cell_tags(
+    mut frames: Vec<Frame>,
+    tags: Option<(Location, u128, Tag)>,
+) -> Fragment {
     if let Some((loc, key, start_tag)) = tags
         && let Some((first, remainder)) = frames.split_first_mut()
     {
@@ -120,8 +129,7 @@ pub fn layout_cell(
             ]);
         }
     }
-
-    Ok(Fragment::frames(frames))
+    Fragment::frames(frames)
 }
 
 /// Generate compact cell tags without allocating Packed<TableCell/GridCell>.
