@@ -386,10 +386,8 @@ impl<'a> GridLayouter<'a> {
     /// Determines the columns sizes and then layouts the grid row-by-row.
     pub fn layout(mut self, engine: &mut Engine) -> SourceResult<Fragment> {
         // Bypass cell-level comemo caching for large grids. This prevents
-        // accumulating ~165 MB of paragraph cache entries across many
-        // tables. Table-level caching (layout_multi_impl) provides iter 2
-        // cache hits for budgeted tables; cell caching is unnecessary for
-        // those. For non-budgeted tables, cell caching would waste memory.
+        // accumulating paragraph cache entries that won't be reused.
+        // Also improves speed by avoiding comemo's Content hashing overhead.
         const CELL_BYPASS_THRESHOLD: usize = 100;
         let bypass_cell_memoize = self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
         if bypass_cell_memoize {
@@ -423,11 +421,7 @@ impl<'a> GridLayouter<'a> {
         typst_library::engine_flags::add_grid_entries(self.grid.entries.len());
 
         // Multi-table bypass: when eviction is active and this grid is
-        // large enough, bypass cell-level comemo caching. This prevents
-        // accumulating comemo entries that would be evicted shortly after,
-        // avoiding wasted hashing overhead. Uses a scoped guard so the
-        // bypass only applies to layout_fragment_impl calls within this
-        // grid, not to header/footer marginals that benefit from caching.
+        // large enough, bypass cell-level comemo caching.
         let table_bypass_active = eviction_enabled
             && self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
         if table_bypass_active {
