@@ -4,7 +4,7 @@ Comprehensive benchmarks comparing the **original Typst 0.14.2** binary against 
 
 ## Key Results
 
-At **100,000 rows** (the largest size both binaries can handle):
+At **100,000 rows** (the largest size practical for both binaries):
 
 | Metric | Original | Optimized | Improvement |
 |--------|----------|-----------|-------------|
@@ -15,7 +15,7 @@ At **100,000 rows** (the largest size both binaries can handle):
 | **Multi-Table (Advanced)** — Peak RAM | 14,706 MB | 3,696 MB | **75% reduction** |
 | **Multi-Table (Advanced)** — Time | 36.4s | 27.8s | **1.3x faster** |
 
-The optimized binary scales to **1.2 million rows** (producing 3+ GB PDFs) — sizes the original binary cannot handle at all.
+The optimized binary scales to **1.2 million rows** (producing 3+ GB PDFs). The original binary can handle 300K rows but requires ~45 GB of RAM.
 
 ## Overview
 
@@ -63,7 +63,7 @@ RAM and time per 1,000 rows. The optimized binary uses **~23 MB/1K rows** vs the
 
 ### Optimized Binary: Large Document Scaling
 
-The optimized binary handles documents the original cannot. At 1.2M rows it produces a 3+ GB PDF while staying within ~28-40 GB RAM.
+The optimized binary scales to 1.2M rows, producing 3+ GB PDFs. Scaling is approximately linear up to 600K rows; beyond that, time grows super-linearly due to memory pressure at 27-40 GB RSS.
 
 ![Optimized Scaling](benchmarks/optimized_scaling.png)
 
@@ -89,10 +89,10 @@ The optimized binary handles documents the original cannot. At 1.2M rows it prod
 | Multi-Table | 50,000 | 7,528 | 1,887 | 75% | 17.39s | 12.36s | 1.4x |
 | Multi-Table | 100,000 | 14,706 | 3,696 | 75% | 36.44s | 27.77s | 1.3x |
 
-### Optimized-Only (beyond original's limits)
+### Large Scale (300K+ rows)
 
-| Template | Rows | Peak RAM (MB) | Time | PDF Size |
-|----------|------|---------------|------|----------|
+| Template | Rows | Optimized RAM (MB) | Optimized Time | PDF Size |
+|----------|------|--------------------|----------------|----------|
 | Simple | 300,000 | 6,819 | 53.8s | 749 MB |
 | Simple | 600,000 | 13,645 | 125.8s | 1,502 MB |
 | Simple | 1,200,000 | 27,601 | 417.1s | 3,087 MB |
@@ -102,7 +102,11 @@ The optimized binary handles documents the original cannot. At 1.2M rows it prod
 | Multi-Table | 300,000 | 10,889 | 116.0s | 917 MB |
 | Multi-Table | 600,000 | 21,636 | 540.1s | 1,838 MB |
 
-> **Note:** Multi-Table at 1.2M rows (25,341 separate tables) was excluded — it requires ~40+ GB RAM and gets stuck during PDF serialization. This is a known limitation of the multi-table architecture where each group creates a separate table element.
+For reference, the original binary at 300K rows requires ~45 GB of RAM (measured separately via `profile_final.py`). It was not included in the formal benchmark suite at this scale due to the extreme memory requirements.
+
+> **Note on scaling:** Time scales approximately linearly from 300K to 600K rows (~2x), but super-linearly from 600K to 1.2M rows (~3.3x for simple, ~3.7x for advanced). This is likely due to memory pressure effects — at 27-40 GB RSS, the OS memory manager introduces overhead. Multi-Table at 600K rows already shows this effect (540s vs the expected ~230s), because each of the ~12,000 separate table elements adds overhead.
+>
+> Multi-Table at 1.2M rows was excluded — it requires ~40+ GB RAM and PDF serialization becomes impractical with ~25,000 separate table elements.
 
 ## Test Templates
 
