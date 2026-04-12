@@ -23,6 +23,14 @@ use crate::page_store::{
     SyncDiskFrameStore,
 };
 
+/// Result of the combined measure + layout fast path.
+enum CombinedRowResult {
+    /// Row was fully laid out in a single region.
+    Done,
+    /// Row needs a region skip (empty first frame detected).
+    SkipRegion,
+}
+
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
@@ -1507,6 +1515,26 @@ impl<'a> GridLayouter<'a> {
         disambiguator: usize,
         y: usize,
     ) -> SourceResult<()> {
+        // Fast path: for breakable auto rows without rowspans in large grids,
+        // combine measure + layout into one pass. This avoids laying out each
+        // cell twice (once for height measurement, once for final positioning).
+        // Safe for top-aligned cells where the frame content doesn't change
+        // when resized to a taller height.
+        if self.unbreakable_rows_left == 0
+            && self.grid.entries.len() >= 100
+        {
+            if let Some(result) = self.try_layout_auto_row_combined(engine, disambiguator, y)? {
+                match result {
+                    CombinedRowResult::Done => return Ok(()),
+                    CombinedRowResult::SkipRegion => {
+                        self.finish_region(engine, false)?;
+                        // Fall through to standard path for re-measurement
+                    }
+                }
+            }
+            // Fall through: combined path couldn't handle this row
+        }
+
         // Determine the size for each region of the row. If the first region
         // ends up empty for some column, skip the region and remeasure.
         let mut resolved = match self.measure_auto_row(
@@ -1876,6 +1904,151 @@ impl<'a> GridLayouter<'a> {
         }
 
         Ok(output)
+    }
+
+    /// Combined measure + layout for a single auto row. Returns:
+    /// - `Ok(Some(Done))` if the row was fully laid out (single region, no issues)
+    /// - `Ok(Some(SkipRegion))` if the row needs a region skip (empty first frame)
+    /// - `Ok(None)` if this row can't use the fast path (rowspans, multi-region, etc.)
+    fn try_layout_auto_row_combined(
+        &mut self,
+        engine: &mut Engine,
+        disambiguator: usize,
+        y: usize,
+    ) -> SourceResult<Option<CombinedRowResult>> {
+        let breakable = self.unbreakable_rows_left == 0;
+        if !breakable {
+            return Ok(None);
+        }
+
+        // Collect cell frames from a single layout pass.
+        let mut max_height = Abs::zero();
+        // (column_index, cell_width, frame)
+        let mut cell_frames: Vec<(usize, Abs, Frame)> = Vec::new();
+
+        for x in 0..self.rcols.len() {
+            let Some(parent) = self.grid.parent_cell_position(x, y) else {
+                continue;
+            };
+            if parent.x != x {
+                continue;
+            }
+            let cell = self.grid.cell(parent.x, parent.y).unwrap();
+            let rowspan = self.grid.effective_rowspan_of_cell(cell);
+
+            // Can't handle rowspans in the fast path.
+            if rowspan > 1 {
+                return Ok(None);
+            }
+
+            let measurement_data = self.prepare_auto_row_cell_measurement(
+                parent,
+                cell,
+                breakable,
+                None,
+            );
+            let size = Axes::new(measurement_data.width, measurement_data.height);
+            let backlog =
+                measurement_data.backlog.unwrap_or(&measurement_data.custom_backlog);
+
+            let mut pod = self.regions;
+            pod.size = size;
+            pod.backlog = backlog;
+            pod.full = measurement_data.full;
+            pod.last = measurement_data.last;
+
+            let locator = self.cell_locator(parent, disambiguator);
+            let frames = layout_cell(
+                cell,
+                engine,
+                locator,
+                self.styles,
+                pod,
+                self.row_state.is_being_repeated,
+            )?
+            .into_frames();
+
+            // HACK: Also consider frames empty if they only contain tags.
+            fn is_empty_frame(frame: &Frame) -> bool {
+                frame.items().all(|(_, item)| matches!(item, FrameItem::Tag(_)))
+            }
+
+            let current_frames = &frames[measurement_data.frames_in_previous_regions..];
+
+            // Skip region if first frame is empty but others aren't.
+            if let [first, rest @ ..] = current_frames {
+                if is_empty_frame(first)
+                    && rest.iter().any(|frame| !is_empty_frame(frame))
+                {
+                    return Ok(Some(CombinedRowResult::SkipRegion));
+                }
+            }
+
+            // Multi-region row: can't use fast path.
+            let sizes: Vec<Abs> = current_frames
+                .iter()
+                .map(|frame| frame.height())
+                .collect();
+            if sizes.len() > 1 {
+                return Ok(None);
+            }
+
+            if let Some(&h) = sizes.first() {
+                max_height.set_max(h);
+            }
+
+            // Keep the frame for reuse.
+            let width = self.cell_spanned_width(cell, x);
+            if let Some(frame) = frames.into_iter()
+                .skip(measurement_data.frames_in_previous_regions)
+                .next()
+            {
+                cell_frames.push((x, width, frame));
+            }
+        }
+
+        if max_height == Abs::zero() && cell_frames.is_empty() {
+            return Ok(None);
+        }
+
+        if !self.width.is_finite() || !max_height.is_finite() {
+            return Ok(None);
+        }
+
+        // Build the output frame using the cached measurement frames.
+        // Resize each cell frame to the determined row height.
+        // This is valid for top-aligned cells (the default) because
+        // the content items stay at position (0,0) regardless of frame height.
+        let mut output = Frame::soft(Size::new(self.width, max_height));
+        let mut offset = Point::zero();
+
+        let mut frame_iter = cell_frames.into_iter().peekable();
+
+        for (x, &rcol) in self.rcols.iter().enumerate() {
+            if let Some((cx, _, _)) = frame_iter.peek() {
+                if *cx == x {
+                    let (_, width, mut frame) = frame_iter.next().unwrap();
+                    // Resize frame height to row's max height.
+                    let sz = frame.size_mut();
+                    sz.y = max_height;
+
+                    let mut pos = offset;
+                    if self.is_rtl {
+                        pos.x = self.width - (pos.x + width);
+                    }
+                    output.push_frame(pos, frame);
+                }
+            }
+            offset.x += rcol;
+        }
+
+        self.push_row(output, y, true);
+
+        if let Some(row_height) = &mut self.row_state.current_row_height {
+            *row_height += max_height;
+        }
+
+        Ok(Some(CombinedRowResult::Done))
     }
 
     /// Layout a row spanning multiple regions.
