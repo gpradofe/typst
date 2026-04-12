@@ -1,7 +1,7 @@
 //! Serializable proxy types for Frame and its contents.
 //!
 //! Each type mirrors the corresponding Typst type but replaces
-//! non-serializable fields (Arc<Font>, Content, etc.) with
+//! non-serializable fields (`Arc<Font>`, Content, etc.) with
 //! serializable references (hashes, IDs).
 
 use serde::{Deserialize, Serialize};

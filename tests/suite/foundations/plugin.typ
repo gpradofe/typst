@@ -38,7 +38,6 @@
 
 #let hello2 = plugin.transition(empty.add, bytes("hello"))
 #test(hello == world, false)
-// Error: 2-29 Assertion failed: false != true
 #test(hello == hello2, true)
 
 --- plugin-wrong-number-of-arguments eval ---

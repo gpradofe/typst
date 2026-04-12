@@ -144,7 +144,7 @@ impl CellTagMeta {
         !matches!(self.kind, CellTagKind::GridCell)
     }
 
-    /// Convert to Smart<TableCellKind> for PDF tag builder compatibility.
+    /// Convert to `Smart<TableCellKind>` for PDF tag builder compatibility.
     pub fn to_table_cell_kind(&self) -> Smart<TableCellKind> {
         match self.kind {
             CellTagKind::TableData => Smart::Auto,
