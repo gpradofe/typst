@@ -123,12 +123,12 @@ pub struct GridLayouter<'a> {
     pub(super) current: Current,
     /// Frames for finished regions.
     pub(super) finished: Vec<Frame>,
-    /// Store for spilled frames. Uses in-memory serialization during
+    /// Store for flushed frames. Uses in-memory serialization during
     /// convergence (no file I/O overhead) and disk during streaming mode.
     frame_store: Option<FrameStoreKind>,
-    /// Tracks which finished[] indices have been spilled to disk.
-    /// spill_map[i] = Some(store_index) means finished[i] was spilled.
-    spill_map: Vec<Option<usize>>,
+    /// Tracks which finished[] indices have been flushed to disk.
+    /// flush_map[i] = Some(store_index) means finished[i] was flushed.
+    flush_map: Vec<Option<usize>>,
     /// The amount and height of header rows on each finished region.
     pub(super) finished_header_rows: Vec<FinishedHeaderRowInfo>,
     /// Whether this is an RTL grid.
@@ -361,7 +361,7 @@ impl<'a> GridLayouter<'a> {
             rowspans: vec![],
             finished: vec![],
             frame_store: None,
-            spill_map: vec![],
+            flush_map: vec![],
             finished_header_rows: vec![],
             is_rtl: styles.resolve(TextElem::dir) == Dir::RTL,
             repeating_headers: vec![],
@@ -464,20 +464,20 @@ impl<'a> GridLayouter<'a> {
         let cell_release_enabled = streaming
             && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
 
-        // Grid frame spilling: write completed frames to disk for large
+        // Grid frame flushing: write completed frames to disk for large
         // grids. Uses a dynamic threshold based on number of finished frames
         // rather than entry count. Small tables (few pages) stay in-memory;
-        // large tables (many pages) spill to disk to cap peak RSS.
+        // large tables (many pages) flush to disk to cap peak RSS.
         // The threshold is lower in convergence mode (10 frames) because
         // the savings per frame are higher (text shaping data ~0.3 MB/frame).
-        // In streaming mode, always spill (frame data is used once then dropped).
-        // Spill frames for tables with enough entries. During convergence,
+        // In streaming mode, always flush (frame data is used once then dropped).
+        // Flush frames for tables with enough entries. During convergence,
         // uses in-memory serialization (no file I/O) to avoid temp file
         // overhead. During streaming, uses disk-backed storage.
-        let frame_spill_threshold: usize = if self.grid.entries.len() >= 100 {
+        let frame_flush_threshold: usize = if self.grid.entries.len() >= 100 {
             1
         } else {
-            usize::MAX // small grids don't spill
+            usize::MAX // small grids don't flush
         };
         let use_disk_store = streaming;
 
@@ -531,13 +531,13 @@ impl<'a> GridLayouter<'a> {
                 last_evict_at = self.finished.len();
             }
 
-            // Spill completed frames to disk when the table grows beyond
-            // the threshold. Spill every time a new frame is added after
+            // Flush completed frames to disk when the table grows beyond
+            // the threshold. Flush every time a new frame is added after
             // threshold to keep memory bounded. For multi-table documents
             // (threshold=2), this ensures each table's Fragment is disk-backed,
             // keeping the comemo cache small (~200 bytes/table vs ~350 KB).
-            if self.finished.len() > frame_spill_threshold {
-                self.spill_safe_frames(use_disk_store)?;
+            if self.finished.len() > frame_flush_threshold {
+                self.flush_safe_frames(use_disk_store)?;
             }
 
             y += 1;
@@ -554,12 +554,12 @@ impl<'a> GridLayouter<'a> {
             }
         }
 
-        // After rowspans are resolved, spill any remaining un-spilled frames.
-        // At this point no rowspans reference unspilled frames, so all are safe.
+        // After rowspans are resolved, flush any remaining unflushed frames.
+        // At this point no rowspans reference unflushed frames, so all are safe.
         if self.frame_store.is_some() {
-            // spill_safe_frames checks min_rowspan_region, which is now
+            // flush_safe_frames checks min_rowspan_region, which is now
             // self.finished.len() since rowspans Vec was taken (empty).
-            self.spill_safe_frames(use_disk_store)?;
+            self.flush_safe_frames(use_disk_store)?;
         }
 
         self.render_fills_strokes()
@@ -641,8 +641,8 @@ impl<'a> GridLayouter<'a> {
         Ok(())
     }
 
-    /// Spill completed frames that are not referenced by pending rowspans.
-    fn spill_safe_frames(&mut self, use_disk: bool) -> SourceResult<()> {
+    /// Flush completed frames to disk that are not referenced by pending rowspans.
+    fn flush_safe_frames(&mut self, use_disk: bool) -> SourceResult<()> {
         // Initialize store on first call.
         if self.frame_store.is_none() {
             self.frame_store = Some(if use_disk {
@@ -657,7 +657,7 @@ impl<'a> GridLayouter<'a> {
         }
 
         // Find the minimum first_region across all pending rowspans.
-        // Frames before that region are safe to spill (rowspans won't modify them).
+        // Frames before that region are safe to flush (rowspans won't modify them).
         let min_rowspan_region = self
             .rowspans
             .iter()
@@ -667,23 +667,23 @@ impl<'a> GridLayouter<'a> {
 
         let store = self.frame_store.as_mut().unwrap();
         for i in 0..min_rowspan_region {
-            while self.spill_map.len() <= i {
-                self.spill_map.push(None);
+            while self.flush_map.len() <= i {
+                self.flush_map.push(None);
             }
 
-            if self.spill_map[i].is_some() {
+            if self.flush_map[i].is_some() {
                 continue;
             }
 
             let store_index = store.frame_count();
             store
                 .append_frame(&self.finished[i])
-                .map_err(|e| ecow::eco_format!("frame spill failed: {e}"))
+                .map_err(|e| ecow::eco_format!("frame flush failed: {e}"))
                 .at(Span::detached())?;
 
             // Replace with empty frame to free memory.
             self.finished[i] = Frame::soft(Size::zero());
-            self.spill_map[i] = Some(store_index);
+            self.flush_map[i] = Some(store_index);
         }
 
         Ok(())
@@ -691,7 +691,7 @@ impl<'a> GridLayouter<'a> {
 
     /// Add lines and backgrounds, then return the finished fragment.
     fn render_fills_strokes(mut self) -> SourceResult<Fragment> {
-        // Use streaming render if frames were spilled to disk (large grid).
+        // Use streaming render if frames were flushed to disk (large grid).
         if self.frame_store.is_some() {
             return self.render_fills_strokes_streaming();
         }
@@ -727,7 +727,7 @@ impl<'a> GridLayouter<'a> {
     fn render_fills_strokes_streaming(mut self) -> SourceResult<Fragment> {
         let mut finished = std::mem::take(&mut self.finished);
         let input_store = self.frame_store.take().unwrap();
-        let spill_map = std::mem::take(&mut self.spill_map);
+        let flush_map = std::mem::take(&mut self.flush_map);
         let use_disk = matches!(input_store, FrameStoreKind::Disk(_));
 
         // For convergence mode (MemoryFrameStore input), use a shared disk
@@ -770,7 +770,7 @@ impl<'a> GridLayouter<'a> {
             .enumerate()
         {
             let mut frame = if let Some(store_idx) =
-                spill_map.get(frame_index).copied().flatten()
+                flush_map.get(frame_index).copied().flatten()
             {
                 input_store
                     .read_frame(store_idx)

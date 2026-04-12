@@ -381,7 +381,7 @@ fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResu
 
     let has_store = document.page_store().is_some();
     let buffer = if has_store {
-        // Large document: pages were spilled to disk during layout.
+        // Large document: pages were flushed to disk during layout.
         // Use streaming PDF conversion — reads pages one at a time.
         let store = document.take_page_store().unwrap();
         comemo::evict(0);

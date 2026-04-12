@@ -3,7 +3,7 @@
 //!
 //! Unlike DiskPageStore which stores full Pages (with numbering, fill, etc.),
 //! this stores only Frames — suitable for use during grid layout where
-//! individual cell/row frames need to be spilled to disk.
+//! individual cell/row frames need to be flushed to disk.
 
 use std::io::{self, Read, Seek, Write};
 

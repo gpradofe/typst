@@ -165,7 +165,7 @@ impl<'a> Runner<'a> {
         // specified or required by paged outputs.
         if self.test.should_run(TestTarget::Paged) {
             let mut doc = self.compile::<PagedDocument>(evaluated.clone());
-            // Reload pages from disk if they were spilled during layout.
+            // Reload pages from disk if they were flushed during layout.
             // Tests need all pages in memory for rendering and comparison.
             if let Some(d) = &mut doc {
                 d.load_pages_from_store();

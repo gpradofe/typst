@@ -1,7 +1,6 @@
 [workspace]
 members = ["crates/*", "docs", "tests", "tests/fuzz", "tests/wrapper"]
 default-members = ["crates/typst-cli"]
-exclude = ["krilla-fork"]
 resolver = "2"
 
 [workspace.package]
@@ -81,8 +80,8 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2" }
+krilla = { git = "https://github.com/gpradofe/krilla", rev = "e218b73", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { git = "https://github.com/gpradofe/krilla", rev = "e218b73" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
@@ -179,10 +178,6 @@ wildcard_in_or_patterns = "allow"
 # See https://github.com/typst/typst/pull/6560#issuecomment-3045393640
 derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
-
-[patch."https://github.com/LaurenzV/krilla"]
-krilla = { path = "krilla-fork/crates/krilla" }
-krilla-svg = { path = "krilla-fork/crates/krilla-svg" }
 
 [patch.crates-io]
 comemo = { path = "comemo-local" }
