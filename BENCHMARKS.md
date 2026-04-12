@@ -17,11 +17,17 @@ At **100,000 rows** (the largest size both binaries can handle):
 
 The optimized binary scales to **1.2 million rows** (producing 3+ GB PDFs) — sizes the original binary cannot handle at all.
 
+## Overview
+
+<p align="center">
+  <img alt="Summary" src="benchmarks/summary.png" width="900">
+</p>
+
 ## Graphs
 
 ### Peak Memory Usage
 
-Log-log comparison showing peak RSS across all row counts. Dashed lines = original, solid = optimized.
+Log-log comparison showing peak RSS across all row counts. Dashed lines = original, solid = optimized. The gap between the curves represents the memory savings — consistently 75-85% at scale.
 
 ![Memory Comparison](benchmarks/memory_comparison.png)
 
