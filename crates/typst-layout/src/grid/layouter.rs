@@ -412,7 +412,9 @@ impl<'a> GridLayouter<'a> {
         if bypass_cell_memoize {
             typst_library::engine_flags::enable_cell_memoize_bypass();
         }
-        struct CellBypassGuard { active: bool }
+        struct CellBypassGuard {
+            active: bool,
+        }
         impl Drop for CellBypassGuard {
             fn drop(&mut self) {
                 if self.active {
@@ -441,12 +443,14 @@ impl<'a> GridLayouter<'a> {
 
         // Multi-table bypass: when eviction is active and this grid is
         // large enough, bypass cell-level comemo caching.
-        let table_bypass_active = eviction_enabled
-            && self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
+        let table_bypass_active =
+            eviction_enabled && self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
         if table_bypass_active {
             typst_library::engine_flags::enable_table_level_bypass();
         }
-        struct TableBypassGuard { active: bool }
+        struct TableBypassGuard {
+            active: bool,
+        }
         impl Drop for TableBypassGuard {
             fn drop(&mut self) {
                 if self.active {
@@ -461,8 +465,8 @@ impl<'a> GridLayouter<'a> {
         // part of the Arc<CellGrid> shared across iterations. Mutating
         // them would corrupt iteration 2's input.
         const CELL_RELEASE_THRESHOLD: usize = 5000;
-        let cell_release_enabled = streaming
-            && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
+        let cell_release_enabled =
+            streaming && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
 
         // Grid frame flushing: write completed frames to disk for large
         // grids. Uses a dynamic threshold based on number of finished frames
@@ -777,10 +781,7 @@ impl<'a> GridLayouter<'a> {
                     .map_err(|e| ecow::eco_format!("frame read failed: {e}"))
                     .at(Span::detached())?
             } else if frame_index < finished.len() {
-                std::mem::replace(
-                    &mut finished[frame_index],
-                    Frame::soft(Size::zero()),
-                )
+                std::mem::replace(&mut finished[frame_index], Frame::soft(Size::zero()))
             } else {
                 Frame::soft(Size::zero())
             };
@@ -982,10 +983,7 @@ impl<'a> GridLayouter<'a> {
             // Position of lines below the row index in the previous iteration.
             let expected_prev_line_position = prev_y
                 .map(|prev_y| {
-                    expected_line_position(
-                        prev_y + 1,
-                        prev_y + 1 == self.grid.rows.len(),
-                    )
+                    expected_line_position(prev_y + 1, prev_y + 1 == self.grid.rows.len())
                 })
                 .unwrap_or(LinePosition::Before);
 
@@ -1082,19 +1080,20 @@ impl<'a> GridLayouter<'a> {
             // 3. Lines from the top border (above the top cells, hence
             // 'before' position only);
             // 4. Lines from the header above us, if present.
-            let hlines_at_row =
-                prev_lines
-                    .iter()
-                    .filter(|line| line.position == expected_prev_line_position)
-                    .chain(hlines_at_y)
-                    .chain(
-                        top_border_hlines
-                            .iter()
-                            .filter(|line| line.position == LinePosition::Before),
-                    )
-                    .chain(header_hlines.iter().filter(|line| {
-                        line.position == expected_header_line_position
-                    }));
+            let hlines_at_row = prev_lines
+                .iter()
+                .filter(|line| line.position == expected_prev_line_position)
+                .chain(hlines_at_y)
+                .chain(
+                    top_border_hlines
+                        .iter()
+                        .filter(|line| line.position == LinePosition::Before),
+                )
+                .chain(
+                    header_hlines
+                        .iter()
+                        .filter(|line| line.position == expected_header_line_position),
+                );
 
             let tracks = self.rcols.iter().copied().enumerate();
 
@@ -1194,10 +1193,8 @@ impl<'a> GridLayouter<'a> {
                 // therefore removed), so its fill could start in that
                 // gutter row. That's why we use
                 // 'effective_parent_cell_position'.
-                let parent = self
-                    .grid
-                    .effective_parent_cell_position(x, row.y)
-                    .filter(|parent| {
+                let parent =
+                    self.grid.effective_parent_cell_position(x, row.y).filter(|parent| {
                         // Ensure this is the first column spanned by the
                         // cell before drawing its fill, otherwise we
                         // already rendered its fill in a previous
@@ -1215,12 +1212,9 @@ impl<'a> GridLayouter<'a> {
                         // of 1 and we're not currently at a gutter row.
                         parent.x == x
                             && (parent.y == row.y
-                                || rows
-                                    .iter()
-                                    .find(|row| row.y >= parent.y)
-                                    .is_some_and(|first_spanned_row| {
-                                        first_spanned_row.y == row.y
-                                    }))
+                                || rows.iter().find(|row| row.y >= parent.y).is_some_and(
+                                    |first_spanned_row| first_spanned_row.y == row.y,
+                                ))
                     });
 
                 if let Some(parent) = parent {
@@ -1349,8 +1343,8 @@ impl<'a> GridLayouter<'a> {
             // if there are enough cells.
             let mut work_items: Vec<(
                 &Cell,
-                Abs,       // already_covered_width
-                Regions,   // pod
+                Abs,     // already_covered_width
+                Regions, // pod
                 Locator,
             )> = Vec::new();
 
@@ -1404,15 +1398,13 @@ impl<'a> GridLayouter<'a> {
                     .iter()
                     .skip(y)
                     .take(rowspan)
-                    .try_fold(Abs::zero(), |acc, col| {
-                        match col {
-                            Sizing::Rel(v) => Some(
-                                acc + v
-                                    .resolve(self.styles)
-                                    .relative_to(self.regions.base().y),
-                            ),
-                            _ => None,
-                        }
+                    .try_fold(Abs::zero(), |acc, col| match col {
+                        Sizing::Rel(v) => Some(
+                            acc + v
+                                .resolve(self.styles)
+                                .relative_to(self.regions.base().y),
+                        ),
+                        _ => None,
                     })
                     .unwrap_or_else(|| self.regions.base().y);
 
@@ -1430,15 +1422,22 @@ impl<'a> GridLayouter<'a> {
                 // columns. Each cell measurement is independent.
                 let styles = self.styles;
                 let is_repeated = self.row_state.is_being_repeated;
-                let results: Vec<_> = engine.parallelize(
-                    work_items.into_iter(),
-                    |engine, (cell, covered_width, pod, locator)| {
-                        let result = layout_cell(
-                            cell, engine, locator, styles, pod, is_repeated,
-                        );
-                        result.map(|frag| frag.into_frame().width() - covered_width)
-                    },
-                ).collect();
+                let results: Vec<_> = engine
+                    .parallelize(
+                        work_items.into_iter(),
+                        |engine, (cell, covered_width, pod, locator)| {
+                            let result = layout_cell(
+                                cell,
+                                engine,
+                                locator,
+                                styles,
+                                pod,
+                                is_repeated,
+                            );
+                            result.map(|frag| frag.into_frame().width() - covered_width)
+                        },
+                    )
+                    .collect();
 
                 // Find max width, propagating errors.
                 let mut max_width = Abs::zero();
@@ -1531,9 +1530,7 @@ impl<'a> GridLayouter<'a> {
         // cell twice (once for height measurement, once for final positioning).
         // Safe for top-aligned cells where the frame content doesn't change
         // when resized to a taller height.
-        if self.unbreakable_rows_left == 0
-            && self.grid.entries.len() >= 100
-        {
+        if self.unbreakable_rows_left == 0 && self.grid.entries.len() >= 100 {
             // Trigger parallel pre-computation for upcoming rows when the
             // current chunk is exhausted. This batches 200+ cells across
             // multiple rows for parallel layout via engine.parallelize().
@@ -1542,7 +1539,9 @@ impl<'a> GridLayouter<'a> {
                 self.pre_compute_row_chunk(engine, y)?;
             }
 
-            if let Some(result) = self.try_layout_auto_row_combined(engine, disambiguator, y)? {
+            if let Some(result) =
+                self.try_layout_auto_row_combined(engine, disambiguator, y)?
+            {
                 match result {
                     CombinedRowResult::Done => return Ok(()),
                     CombinedRowResult::SkipRegion => {
@@ -1948,14 +1947,17 @@ impl<'a> GridLayouter<'a> {
         while y < self.grid.rows.len() && rows_collected < MAX_CHUNK_ROWS {
             // Stop at upcoming headers.
             if let Some(next_header) = self.upcoming_headers.first()
-                && y >= next_header.range.start {
-                    break;
-                }
+                && y >= next_header.range.start
+            {
+                break;
+            }
             // Stop at repeated footers.
             if let Some(footer) = &self.grid.footer
-                && footer.repeated && y >= footer.start {
-                    break;
-                }
+                && footer.repeated
+                && y >= footer.start
+            {
+                break;
+            }
 
             // Skip gutter rows.
             if self.grid.is_gutter_track(y) {
@@ -2045,11 +2047,10 @@ impl<'a> GridLayouter<'a> {
                 pod.full = pod_full;
                 pod.last = last;
 
-                layout_cell(cell, engine, locator, styles, pod, is_repeated)
-                    .map(|frag| {
-                        let frames = frag.into_frames();
-                        (x, y, frames)
-                    })
+                layout_cell(cell, engine, locator, styles, pod, is_repeated).map(|frag| {
+                    let frames = frag.into_frames();
+                    (x, y, frames)
+                })
             })
             .collect();
 
@@ -2113,15 +2114,16 @@ impl<'a> GridLayouter<'a> {
 
         for (x, &rcol) in self.rcols.iter().enumerate() {
             if let Some((cx, _, _)) = frame_iter.peek()
-                && *cx == x {
-                    let (_, width, mut frame) = frame_iter.next().unwrap();
-                    frame.size_mut().y = max_height;
-                    let mut pos = offset;
-                    if self.is_rtl {
-                        pos.x = self.width - (pos.x + width);
-                    }
-                    output.push_frame(pos, frame);
+                && *cx == x
+            {
+                let (_, width, mut frame) = frame_iter.next().unwrap();
+                frame.size_mut().y = max_height;
+                let mut pos = offset;
+                if self.is_rtl {
+                    pos.x = self.width - (pos.x + width);
                 }
+                output.push_frame(pos, frame);
+            }
             offset.x += rcol;
         }
 
@@ -2150,11 +2152,12 @@ impl<'a> GridLayouter<'a> {
 
         // Try pre-computed cells first (from parallel multi-row batching).
         if !self.pre_computed_cells.is_empty()
-            && let Some(result) = self.try_use_pre_computed_row(y) {
-                return Ok(Some(result));
-            }
-            // Row couldn't use pre-computed cells — don't clear remaining
-            // entries, they may be valid for later rows after a region break.
+            && let Some(result) = self.try_use_pre_computed_row(y)
+        {
+            return Ok(Some(result));
+        }
+        // Row couldn't use pre-computed cells — don't clear remaining
+        // entries, they may be valid for later rows after a region break.
 
         // Collect cell frames from a single layout pass.
         let mut max_height = Abs::zero();
@@ -2176,12 +2179,8 @@ impl<'a> GridLayouter<'a> {
                 return Ok(None);
             }
 
-            let measurement_data = self.prepare_auto_row_cell_measurement(
-                parent,
-                cell,
-                breakable,
-                None,
-            );
+            let measurement_data =
+                self.prepare_auto_row_cell_measurement(parent, cell, breakable, None);
             let size = Axes::new(measurement_data.width, measurement_data.height);
             let backlog =
                 measurement_data.backlog.unwrap_or(&measurement_data.custom_backlog);
@@ -2213,16 +2212,14 @@ impl<'a> GridLayouter<'a> {
             // Skip region if first frame is empty but others aren't.
             if let [first, rest @ ..] = current_frames
                 && is_empty_frame(first)
-                    && rest.iter().any(|frame| !is_empty_frame(frame))
-                {
-                    return Ok(Some(CombinedRowResult::SkipRegion));
-                }
+                && rest.iter().any(|frame| !is_empty_frame(frame))
+            {
+                return Ok(Some(CombinedRowResult::SkipRegion));
+            }
 
             // Multi-region row: can't use fast path.
-            let sizes: Vec<Abs> = current_frames
-                .iter()
-                .map(|frame| frame.height())
-                .collect();
+            let sizes: Vec<Abs> =
+                current_frames.iter().map(|frame| frame.height()).collect();
             if sizes.len() > 1 {
                 return Ok(None);
             }
@@ -2233,7 +2230,8 @@ impl<'a> GridLayouter<'a> {
 
             // Keep the frame for reuse.
             let width = self.cell_spanned_width(cell, x);
-            if let Some(frame) = frames.into_iter().nth(measurement_data.frames_in_previous_regions)
+            if let Some(frame) =
+                frames.into_iter().nth(measurement_data.frames_in_previous_regions)
             {
                 cell_frames.push((x, width, frame));
             }
@@ -2258,18 +2256,19 @@ impl<'a> GridLayouter<'a> {
 
         for (x, &rcol) in self.rcols.iter().enumerate() {
             if let Some((cx, _, _)) = frame_iter.peek()
-                && *cx == x {
-                    let (_, width, mut frame) = frame_iter.next().unwrap();
-                    // Resize frame height to row's max height.
-                    let sz = frame.size_mut();
-                    sz.y = max_height;
+                && *cx == x
+            {
+                let (_, width, mut frame) = frame_iter.next().unwrap();
+                // Resize frame height to row's max height.
+                let sz = frame.size_mut();
+                sz.y = max_height;
 
-                    let mut pos = offset;
-                    if self.is_rtl {
-                        pos.x = self.width - (pos.x + width);
-                    }
-                    output.push_frame(pos, frame);
+                let mut pos = offset;
+                if self.is_rtl {
+                    pos.x = self.width - (pos.x + width);
                 }
+                output.push_frame(pos, frame);
+            }
             offset.x += rcol;
         }
 

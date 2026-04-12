@@ -108,7 +108,9 @@ impl CellTagMeta {
                     }
                 }
                 Smart::Custom(TableCellKind::Footer) => CellTagKind::TableFooter,
-                Smart::Custom(TableCellKind::Data) | Smart::Auto => CellTagKind::TableData,
+                Smart::Custom(TableCellKind::Data) | Smart::Auto => {
+                    CellTagKind::TableData
+                }
             }
         };
         Self {

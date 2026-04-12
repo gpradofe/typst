@@ -85,9 +85,7 @@ impl Fragment {
                 let mut frames = Vec::with_capacity(len);
                 for i in 0..len {
                     frames.push(
-                        source
-                            .read_frame(i)
-                            .expect("failed to read frame from source"),
+                        source.read_frame(i).expect("failed to read frame from source"),
                     );
                 }
                 frames
@@ -159,11 +157,7 @@ impl Fragment {
             }
             FragmentInner::External(source) => {
                 let len = source.len();
-                FragmentIntoIter::External {
-                    source,
-                    index: start,
-                    len,
-                }
+                FragmentIntoIter::External { source, index: start, len }
             }
         }
     }
@@ -209,11 +203,7 @@ impl Debug for Fragment {
 /// For disk-backed fragments, reads frames lazily from the source.
 pub enum FragmentIntoIter {
     Memory(std::vec::IntoIter<Frame>),
-    External {
-        source: Arc<dyn FrameSource>,
-        index: usize,
-        len: usize,
-    },
+    External { source: Arc<dyn FrameSource>, index: usize, len: usize },
 }
 
 impl Iterator for FragmentIntoIter {
@@ -284,7 +274,9 @@ impl<'a> IntoIterator for &'a mut Fragment {
         match &mut self.0 {
             FragmentInner::Memory(frames) => frames.iter_mut(),
             FragmentInner::External(_) => {
-                panic!("&mut Fragment iteration is not supported for disk-backed fragments")
+                panic!(
+                    "&mut Fragment iteration is not supported for disk-backed fragments"
+                )
             }
         }
     }

@@ -138,8 +138,6 @@ fn compile_impl<T: Output>(
     // extracted into `content`, so nothing needed is lost.
     comemo::evict(0);
 
-
-
     let mut history: ArrayVec<T, { MAX_ITERS - 1 }> = ArrayVec::new();
     let mut document: T;
 

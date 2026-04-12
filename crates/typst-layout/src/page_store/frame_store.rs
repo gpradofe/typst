@@ -43,8 +43,7 @@ impl DiskFrameStore {
     /// Appends a single frame to the store.
     pub fn append_frame(&mut self, frame: &Frame) -> io::Result<()> {
         let sframe = self.converter.convert_frame(frame);
-        let bytes = bincode::serialize(&sframe)
-            .map_err(io::Error::other)?;
+        let bytes = bincode::serialize(&sframe).map_err(io::Error::other)?;
 
         let file = self.file.as_file_mut();
         file.seek(io::SeekFrom::End(0))?;
@@ -98,11 +97,7 @@ impl DiskFrameStore {
     /// Uses a single buffered reader for efficient sequential access.
     pub fn frames_iter(&self) -> io::Result<SequentialFrameIterator<'_>> {
         let reader = io::BufReader::new(self.file.reopen()?);
-        Ok(SequentialFrameIterator {
-            store: self,
-            reader,
-            index: 0,
-        })
+        Ok(SequentialFrameIterator { store: self, reader, index: 0 })
     }
 }
 
@@ -131,10 +126,7 @@ impl SyncDiskFrameStore {
     /// Wrap a DiskFrameStore for use as a FrameSource.
     pub fn new(store: DiskFrameStore) -> Self {
         let count = store.frame_count();
-        SyncDiskFrameStore {
-            inner: Mutex::new(store),
-            frame_count: count,
-        }
+        SyncDiskFrameStore { inner: Mutex::new(store), frame_count: count }
     }
 
     /// Convert to an Arc<dyn FrameSource> for Fragment.
@@ -217,8 +209,7 @@ impl MemoryFrameStore {
     /// Appends a single frame to the store.
     pub fn append_frame(&mut self, frame: &Frame) -> io::Result<()> {
         let sframe = self.converter.convert_frame(frame);
-        let bytes = bincode::serialize(&sframe)
-            .map_err(io::Error::other)?;
+        let bytes = bincode::serialize(&sframe).map_err(io::Error::other)?;
 
         let offset = self.data.len() as u64;
         self.offsets.push(offset);
@@ -269,10 +260,7 @@ impl SyncMemoryFrameStore {
     /// Wrap a MemoryFrameStore for use as a FrameSource.
     pub fn new(store: MemoryFrameStore) -> Self {
         let count = store.frame_count();
-        SyncMemoryFrameStore {
-            inner: store,
-            frame_count: count,
-        }
+        SyncMemoryFrameStore { inner: store, frame_count: count }
     }
 
     /// Convert to an Arc<dyn FrameSource> for Fragment.

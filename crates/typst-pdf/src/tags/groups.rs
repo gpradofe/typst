@@ -144,7 +144,9 @@ impl Groups {
                 GroupKind::Outline(_, _) => ResolvedGroupKind::Outline,
                 GroupKind::OutlineEntry(_, _) => ResolvedGroupKind::OutlineEntry,
                 GroupKind::Table(id, _, _) => ResolvedGroupKind::Table(id),
-                GroupKind::TableCell(_, tag_id, _) => ResolvedGroupKind::TableCell(tag_id),
+                GroupKind::TableCell(_, tag_id, _) => {
+                    ResolvedGroupKind::TableCell(tag_id)
+                }
                 GroupKind::Grid(_, _) => ResolvedGroupKind::Grid,
                 GroupKind::GridCell(_, _) => ResolvedGroupKind::GridCell,
                 GroupKind::List(_, numbering, _) => ResolvedGroupKind::List(numbering),
@@ -156,9 +158,9 @@ impl Groups {
                 GroupKind::FigureWrapper(id) => ResolvedGroupKind::FigureWrapper(id),
                 GroupKind::Figure(id, _, _) => ResolvedGroupKind::Figure(id),
                 GroupKind::FigureCaption(_, _) => ResolvedGroupKind::FigureCaption,
-                GroupKind::Image(ref image, _, _) => ResolvedGroupKind::Image {
-                    alt: image.alt.opt_ref().cloned(),
-                },
+                GroupKind::Image(ref image, _, _) => {
+                    ResolvedGroupKind::Image { alt: image.alt.opt_ref().cloned() }
+                }
                 GroupKind::Formula(ref equation, _, _) => ResolvedGroupKind::Formula {
                     alt: equation.alt.opt_ref().cloned(),
                     block: equation.block.val(),
@@ -181,14 +183,7 @@ impl Groups {
         let tag_storage = std::mem::replace(&mut self.tags, TagStorage::new());
 
         FlatTagTree {
-            data: FlatTagData {
-                kinds,
-                spans,
-                children,
-                weak,
-                langs,
-                bboxes,
-            },
+            data: FlatTagData { kinds, spans, children, weak, langs, bboxes },
             tag_storage,
         }
     }

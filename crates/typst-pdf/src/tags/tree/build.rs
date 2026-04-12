@@ -196,7 +196,8 @@ pub fn build_from_store(
 
     // Read pages from disk one at a time — each page is dropped after
     // visiting its frame, so at most one page is in memory.
-    let page_iter = store.pages_iter()
+    let page_iter = store
+        .pages_iter()
         .map_err(|e| ecow::eco_format!("failed to open page store for tags: {e}"))
         .at(typst_syntax::Span::detached())?;
 
@@ -212,7 +213,6 @@ pub fn build_from_store(
 }
 
 fn build_finish(mut tree: TreeBuilder, options: &PdfOptions) -> SourceResult<Tree> {
-
     if let Some(last) = tree.stack.last() {
         panic_internal("tags weren't properly closed")
             .at(tree.groups.get(last.id).span)?;
@@ -270,12 +270,20 @@ fn visit_frame(tree: &mut TreeBuilder, frame: &Frame) -> SourceResult<()> {
     for (_, item) in frame.items() {
         match item {
             FrameItem::Group(group) => visit_group_frame(tree, group)?,
-            FrameItem::Tag(typst_library::introspection::Tag::Start(elem, loc, flags)) => {
+            FrameItem::Tag(typst_library::introspection::Tag::Start(
+                elem,
+                loc,
+                flags,
+            )) => {
                 if flags.tagged {
                     visit_start_tag(tree, elem, *loc);
                 }
             }
-            FrameItem::Tag(typst_library::introspection::Tag::CellStart(meta, loc, flags)) => {
+            FrameItem::Tag(typst_library::introspection::Tag::CellStart(
+                meta,
+                loc,
+                flags,
+            )) => {
                 if flags.tagged {
                     visit_cell_start_tag(tree, meta, *loc);
                 }
@@ -372,8 +380,12 @@ fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Locatio
             TableCell::new(Content::default())
                 .with_x(Smart::Custom(meta.x as usize))
                 .with_y(Smart::Custom(meta.y as usize))
-                .with_colspan(NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN))
-                .with_rowspan(NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN))
+                .with_colspan(
+                    NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN),
+                )
+                .with_rowspan(
+                    NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN),
+                )
                 .with_kind(meta.to_table_cell_kind()),
         );
 
@@ -392,8 +404,12 @@ fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Locatio
             GridCell::new(Content::default())
                 .with_x(Smart::Custom(meta.x as usize))
                 .with_y(Smart::Custom(meta.y as usize))
-                .with_colspan(NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN))
-                .with_rowspan(NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN)),
+                .with_colspan(
+                    NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN),
+                )
+                .with_rowspan(
+                    NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN),
+                ),
         );
 
         GroupKind::GridCell(cell, None)
@@ -614,37 +630,67 @@ fn no_progress(tree: &TreeBuilder) -> GroupId {
     tree.current()
 }
 
-fn push_tag(tree: &mut TreeBuilder, elem: &Content, loc: Location, tag: impl Into<TagKind>) -> GroupId {
+fn push_tag(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    tag: impl Into<TagKind>,
+) -> GroupId {
     let id = tree.groups.tags.push(tag.into());
     push_group(tree, elem, loc, GroupKind::Standard(id, None))
 }
 
-fn push_text_attr(tree: &mut TreeBuilder, elem: &Content, loc: Location, attr: TextAttr) -> GroupId {
+fn push_text_attr(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    attr: TextAttr,
+) -> GroupId {
     let span = elem.span();
     let parent = tree.current();
     let id = tree.groups.new_virtual(parent, span, GroupKind::TextAttr(attr));
     push_stack_entry(tree, Some(loc), id)
 }
 
-fn push_artifact(tree: &mut TreeBuilder, elem: &Content, loc: Location, ty: ArtifactType) -> GroupId {
+fn push_artifact(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    ty: ArtifactType,
+) -> GroupId {
     push_group(tree, elem, loc, GroupKind::Artifact(ty))
 }
 
-fn push_group(tree: &mut TreeBuilder, elem: &Content, loc: Location, kind: GroupKind) -> GroupId {
+fn push_group(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    kind: GroupKind,
+) -> GroupId {
     let span = elem.span();
     let parent = tree.current();
     let id = tree.groups.new_virtual(parent, span, kind);
     push_stack_entry(tree, Some(loc), id)
 }
 
-fn push_located(tree: &mut TreeBuilder, elem: &Content, loc: Location, kind: GroupKind) -> GroupId {
+fn push_located(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    kind: GroupKind,
+) -> GroupId {
     let span = elem.span();
     let parent = tree.current();
     let id = tree.groups.new_located(loc, parent, span, kind);
     push_stack_entry(tree, Some(loc), id)
 }
 
-fn push_weak(tree: &mut TreeBuilder, elem: &Content, loc: Location, kind: GroupKind) -> GroupId {
+fn push_weak(
+    tree: &mut TreeBuilder,
+    elem: &Content,
+    loc: Location,
+    kind: GroupKind,
+) -> GroupId {
     let span = elem.span();
     let parent = tree.current();
     let id = tree.groups.new_weak(parent, span, kind);

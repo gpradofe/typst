@@ -466,7 +466,6 @@ impl<P> ElementIntrospector<P> {
             .cloned()
             .unwrap_or(usize::MAX..usize::MAX)
     }
-
 }
 
 /// Constructs the [`ElementIntrospector`].

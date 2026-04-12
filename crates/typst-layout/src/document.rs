@@ -35,7 +35,12 @@ impl PagedDocument {
     ///
     /// The introspector is built lazily on first access via `introspector()`.
     pub fn new(pages: EcoVec<Page>, info: DocumentInfo) -> Self {
-        Self { pages, info, introspector: OnceLock::new(), page_store: None }
+        Self {
+            pages,
+            info,
+            introspector: OnceLock::new(),
+            page_store: None,
+        }
     }
 
     /// The document's finished pages.
@@ -53,9 +58,8 @@ impl PagedDocument {
     /// On first call, this builds the introspector by scanning all page
     /// frames. Subsequent calls return the cached introspector.
     pub fn introspector(&self) -> &Arc<PagedIntrospector> {
-        self.introspector.get_or_init(|| {
-            Arc::new(PagedIntrospector::new(&self.pages))
-        })
+        self.introspector
+            .get_or_init(|| Arc::new(PagedIntrospector::new(&self.pages)))
     }
 
     /// Drops page frames to free memory, keeping only the introspector
@@ -244,5 +248,4 @@ mod tests {
         fn ensure_send_and_sync<T: Send + Sync>() {}
         ensure_send_and_sync::<PagedDocument>();
     }
-
 }

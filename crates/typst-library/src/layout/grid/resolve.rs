@@ -450,11 +450,7 @@ impl ResolvableCell for Packed<TableCell> {
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
-            source: Some(CellSource::Table {
-                cell_x: x,
-                cell_y: y,
-                kind,
-            }),
+            source: Some(CellSource::Table { cell_x: x, cell_y: y, kind }),
             source_span,
         }
     }
@@ -588,10 +584,7 @@ impl ResolvableCell for Packed<GridCell> {
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
-            source: Some(CellSource::Grid {
-                cell_x: x,
-                cell_y: y,
-            }),
+            source: Some(CellSource::Grid { cell_x: x, cell_y: y }),
             source_span,
         }
     }
@@ -1070,11 +1063,7 @@ impl CellGrid {
         let factor = if self.has_gutter { 2 } else { 1 };
         for col_idx in 0..c {
             let x = col_idx * factor;
-            let entry_idx = if self.has_gutter {
-                (y / 2) * c + x / 2
-            } else {
-                y * c + x
-            };
+            let entry_idx = if self.has_gutter { (y / 2) * c + x / 2 } else { y * c + x };
             if let Some(Entry::Cell(cell)) = self.entries.get(entry_idx)
                 && cell.rowspan.get() == 1
             {
@@ -1094,11 +1083,7 @@ impl CellGrid {
     /// Uses the same interior mutability approach as release_row_cells.
     pub fn release_cell(&self, x: usize, y: usize) {
         let c = self.non_gutter_column_count();
-        let entry_idx = if self.has_gutter {
-            (y / 2) * c + x / 2
-        } else {
-            y * c + x
-        };
+        let entry_idx = if self.has_gutter { (y / 2) * c + x / 2 } else { y * c + x };
         if let Some(Entry::Cell(cell)) = self.entries.get(entry_idx) {
             unsafe {
                 let cell_ptr = cell as *const Cell as *mut Cell;
@@ -2879,4 +2864,3 @@ fn skip_auto_index_through_fully_merged_rows(
         }
     }
 }
-

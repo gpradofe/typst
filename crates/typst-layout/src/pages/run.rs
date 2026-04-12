@@ -9,9 +9,9 @@ use typst_library::introspection::{
     Counter, CounterDisplayElem, CounterKey, Introspector, Locator, LocatorLink,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, Binding, ColumnsElem, Dir, Frame,
-    HAlignment, Length, OuterVAlignment, PageElem, Paper, Region, Regions, Rel, Sides,
-    Size, VAlignment,
+    Abs, AlignElem, Alignment, Axes, Binding, ColumnsElem, Dir, Frame, HAlignment,
+    Length, OuterVAlignment, PageElem, Paper, Region, Regions, Rel, Sides, Size,
+    VAlignment,
 };
 use typst_library::model::Numbering;
 use typst_library::pdf::ArtifactKind;
@@ -20,7 +20,7 @@ use typst_library::text::{LocalName, TextElem};
 use typst_library::visualize::Paint;
 use typst_utils::{Numeric, Protected};
 
-use crate::flow::{layout_flow, FlowMode};
+use crate::flow::{FlowMode, layout_flow};
 
 /// A mostly finished layout for one page. Needs only knowledge of its exact
 /// page number to be finalized into a `Page`. (Because the margins can depend
