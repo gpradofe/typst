@@ -115,7 +115,7 @@ pub fn convert_streaming(
     };
 
     let mut document = Document::new_with(settings);
-    // Use store page count when document pages are empty (spilled to disk).
+    // Use store page count when document pages are empty (flushed to disk).
     let page_count = if typst_document.pages().is_empty() {
         store.page_count()
     } else {
@@ -131,7 +131,7 @@ pub fn convert_streaming(
 
     // Build tags — either from in-memory pages or from disk store.
     let tags = if typst_document.pages().is_empty() {
-        // Pages were already spilled to disk (Phase 1 spilling).
+        // Pages were already flushed to disk (Phase 1 flushing).
         // Read them from the store one at a time.
         tags::init_from_store(typst_document, options, store)?
     } else {

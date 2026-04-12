@@ -26,7 +26,7 @@ pub struct PagedDocument {
     info: DocumentInfo,
     introspector: OnceLock<Arc<PagedIntrospector>>,
     /// Optional disk-backed page store for large documents.
-    /// When set, pages may have been spilled to disk during layout.
+    /// When set, pages may have been flushed to disk during layout.
     page_store: Option<Arc<DiskPageStore>>,
 }
 

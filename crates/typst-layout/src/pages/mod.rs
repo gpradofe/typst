@@ -190,12 +190,12 @@ fn layout_document_common(
     Ok(doc)
 }
 
-/// Page count threshold above which pages are spilled to disk during layout.
+/// Page count threshold above which pages are flushed to disk during layout.
 /// Below this, all pages are kept in memory (current behavior).
 /// Lower values reduce peak RSS but increase disk I/O.
-const SPILL_THRESHOLD: usize = 25;
+const FLUSH_THRESHOLD: usize = 25;
 
-/// Layout pages with streaming disk spill for large documents.
+/// Layout pages with streaming disk flush for large documents.
 ///
 /// For small documents: returns (all pages, None, None) — current behavior.
 /// For large documents: returns (empty pages, store, introspector).
@@ -220,41 +220,41 @@ fn layout_pages_streaming<'a>(
     // Use streaming path only when streaming mode is active (Phase 2).
     // During convergence, use the batched path for better performance
     // (avoids per-page callback overhead, DiskPageStore serialization,
-    // and incremental introspector building). Page spilling handles
-    // memory bounding for large documents via SPILL_THRESHOLD.
+    // and incremental introspector building). Page flushing handles
+    // memory bounding for large documents via FLUSH_THRESHOLD.
     let first_iteration = streaming;
 
-    // Spill pages to disk when: streaming mode (Phase 2), OR during the
+    // Flush pages to disk when: streaming mode (Phase 2), OR during the
     // first convergence iteration for large documents. In both cases we
     // build the introspector incrementally and drop each page after
     // serializing it.
-    let mut spilling = streaming;
-    let mut store: Option<DiskPageStore> = if spilling {
+    let mut flushing = streaming;
+    let mut store: Option<DiskPageStore> = if flushing {
         Some(DiskPageStore::new()
             .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
             .at(typst_syntax::Span::detached())?)
     } else {
         None
     };
-    let mut intro_builder: Option<PagedIntrospectorBuilder> = if spilling {
+    let mut intro_builder: Option<PagedIntrospectorBuilder> = if flushing {
         Some(PagedIntrospectorBuilder::with_capacity(0))
     } else {
         None
     };
 
-    // Shared logic: process a single finalized page (spill or accumulate).
+    // Shared logic: process a single finalized page (flush or accumulate).
     let process_page = |page: Page,
                             total_pages: &mut usize,
                             pages: &mut EcoVec<Page>,
                             store: &mut Option<DiskPageStore>,
                             intro_builder: &mut Option<PagedIntrospectorBuilder>,
-                            spilling: &mut bool|
+                            flushing: &mut bool|
      -> SourceResult<()> {
-        // Start spilling mid-stream if threshold exceeded.
-        // Only spill during iter1 (eviction enabled) or streaming mode.
+        // Start flushing mid-stream if threshold exceeded.
+        // Only flush during iter1 (eviction enabled) or streaming mode.
         // In iter2, keep pages in memory for fast regular PDF export
         // instead of forcing the slower disk-backed pdf_streaming path.
-        if !*spilling && *total_pages + 1 > SPILL_THRESHOLD
+        if !*flushing && *total_pages + 1 > FLUSH_THRESHOLD
             && typst_library::engine_flags::is_layout_eviction_enabled() {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
@@ -263,22 +263,22 @@ fn layout_pages_streaming<'a>(
             for (i, p) in pages.iter().enumerate() {
                 ib.discover_page(i, p);
                 s.append_page(p)
-                    .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
+                    .map_err(|e| ecow::eco_format!("disk flush failed: {e}"))
                     .at(typst_syntax::Span::detached())?;
             }
             *pages = EcoVec::new();
             *store = Some(s);
             *intro_builder = Some(ib);
-            *spilling = true;
+            *flushing = true;
         }
 
-        if *spilling {
+        if *flushing {
             intro_builder.as_mut().unwrap().discover_page(*total_pages, &page);
             store
                 .as_mut()
                 .unwrap()
                 .append_page(&page)
-                .map_err(|e| ecow::eco_format!("disk spill failed: {e}"))
+                .map_err(|e| ecow::eco_format!("disk flush failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
         } else {
             pages.push(page);
@@ -289,8 +289,8 @@ fn layout_pages_streaming<'a>(
 
     // For the first convergence iteration, use streaming page-by-page
     // processing. This avoids accumulating all page frames in memory —
-    // each page is finalized, spilled, and dropped before the next is
-    // produced. For subsequent iterations, use the parallel memoized path.
+    // each page is finalized, flushed to disk, and dropped before the next
+    // is produced. For subsequent iterations, use the parallel memoized path.
     if first_iteration {
         for item in &items {
             match item {
@@ -307,7 +307,7 @@ fn layout_pages_streaming<'a>(
                     let styles = StyleChain::new(&prepared.styles);
 
                     // Use streaming flow layout: each page frame is composed,
-                    // processed (finalized + spilled), and dropped before the
+                    // processed (finalized + flushed to disk), and dropped before the
                     // next is composed. This avoids holding all ~500 page
                     // frames simultaneously, saving ~160 MB of peak RAM.
                     let flow_loc = run_locator.relayout();
@@ -336,7 +336,7 @@ fn layout_pages_streaming<'a>(
                                 &mut pages,
                                 &mut store,
                                 &mut intro_builder,
-                                &mut spilling,
+                                &mut flushing,
                             )?;
                             page_idx += 1;
                             Ok(())
@@ -356,7 +356,7 @@ fn layout_pages_streaming<'a>(
                         &mut pages,
                         &mut store,
                         &mut intro_builder,
-                        &mut spilling,
+                        &mut flushing,
                     )?;
                 }
                 Item::Tags(items) => {
@@ -396,14 +396,14 @@ fn layout_pages_streaming<'a>(
                             &mut pages,
                             &mut store,
                             &mut intro_builder,
-                            &mut spilling,
+                            &mut flushing,
                         )?;
                     }
 
-                    // Evict comemo caches when pages are spilled in
+                    // Evict comemo caches when pages are flushed in
                     // streaming mode. During convergence, caches are
                     // needed for iter2 cache hits.
-                    if spilling && streaming {
+                    if flushing && streaming {
                         comemo::evict(0);
                     }
                 }
@@ -420,7 +420,7 @@ fn layout_pages_streaming<'a>(
                         &mut pages,
                         &mut store,
                         &mut intro_builder,
-                        &mut spilling,
+                        &mut flushing,
                     )?;
                 }
                 Item::Tags(items) => {
@@ -448,7 +448,7 @@ fn layout_pages_streaming<'a>(
             // Discover remaining tags in the introspector before finishing.
             if let Some(ib) = intro_builder.as_mut() {
                 // Use height of last page for tag position. We need to read
-                // it from the store since pages vec is empty when spilling.
+                // it from the store since pages vec is empty when flushing.
                 let page_height = if total_pages > 0 {
                     // Read last page just for its height, then drop it.
                     s.read_page(total_pages - 1)

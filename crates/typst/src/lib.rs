@@ -186,7 +186,7 @@ fn compile_impl<T: Output>(
 
             // Phase 2: Streaming re-layout for large paged documents.
             // Now that introspection has converged, re-layout with memoization
-            // disabled and pages spilled to disk. This prevents holding the
+            // disabled and pages flushed to disk. This prevents holding the
             // full document in memory. Only activates for documents exceeding
             // the streaming threshold (>100 pages).
             if document.should_stream() {
