@@ -371,11 +371,10 @@ fn export_paged(
 
 /// Export to a PDF. Takes ownership of the document so pages can be
 /// freed during conversion to reduce peak memory for large documents.
-///
-/// For large documents (>100 pages), uses disk-backed streaming:
+/// Export to a PDF. Uses streaming disk-backed conversion for large documents
+/// (>100 pages):
 /// 1. Serializes pages to a temp file
 /// 2. Builds PDF tag tree while pages are still in memory
-/// Export to a PDF. Uses streaming disk-backed conversion for large documents.
 fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResult<()> {
     let options = pdf_options(config);
 

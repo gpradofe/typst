@@ -578,6 +578,7 @@ mod test {
             breakable: true,
             resolved_inset: None,
             resolved_align: Smart::Auto,
+            apply_inset_align: false,
             source: None,
             source_span: Span::detached(),
         }
@@ -594,6 +595,7 @@ mod test {
             breakable: true,
             resolved_inset: None,
             resolved_align: Smart::Auto,
+            apply_inset_align: false,
             source: None,
             source_span: Span::detached(),
         }
