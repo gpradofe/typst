@@ -811,8 +811,8 @@ pub enum CellSource {
 /// Represents a cell in CellGrid, to be laid out by GridLayouter.
 #[derive(Debug, PartialEq, Hash)]
 pub struct Cell {
-    /// The cell's body content, wrapped in Packed<TableCell> or
-    /// Packed<GridCell> for show rule support. The resolved fields below
+    /// The cell's body content, wrapped in `Packed<TableCell>` or
+    /// `Packed<GridCell>` for show rule support. The resolved fields below
     /// are used by layout_cell for lightweight tag generation.
     pub body: Content,
     /// The cell's fill.

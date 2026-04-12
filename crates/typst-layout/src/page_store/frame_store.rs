@@ -129,7 +129,7 @@ impl SyncDiskFrameStore {
         SyncDiskFrameStore { inner: Mutex::new(store), frame_count: count }
     }
 
-    /// Convert to an Arc<dyn FrameSource> for Fragment.
+    /// Convert to an `Arc<dyn FrameSource>` for Fragment.
     pub fn into_source(self) -> Arc<dyn FrameSource> {
         Arc::new(self)
     }
@@ -175,7 +175,7 @@ impl Iterator for SequentialFrameIterator<'_> {
 // --- MemoryFrameStore: in-memory serialized frame store ---
 
 /// An in-memory store for serialized frames. Like DiskFrameStore but stores
-/// serialized data in a Vec<u8> instead of a temp file, avoiding file I/O.
+/// serialized data in a `Vec<u8>` instead of a temp file, avoiding file I/O.
 /// Useful for small-to-medium tables where disk I/O overhead exceeds the
 /// cost of keeping serialized data in memory.
 pub struct MemoryFrameStore {
@@ -263,7 +263,7 @@ impl SyncMemoryFrameStore {
         SyncMemoryFrameStore { inner: store, frame_count: count }
     }
 
-    /// Convert to an Arc<dyn FrameSource> for Fragment.
+    /// Convert to an `Arc<dyn FrameSource>` for Fragment.
     pub fn into_source(self) -> Arc<dyn FrameSource> {
         Arc::new(self)
     }
@@ -321,7 +321,7 @@ impl SubrangeFrameSource {
         SubrangeFrameSource { store, start, count }
     }
 
-    /// Convert to an Arc<dyn FrameSource>.
+    /// Convert to an `Arc<dyn FrameSource>`.
     pub fn into_source(self) -> Arc<dyn FrameSource> {
         Arc::new(self)
     }

@@ -8,7 +8,7 @@
 //!
 //! # Architecture
 //!
-//! Page frames contain types that can't be directly serialized (Arc<Font>,
+//! Page frames contain types that can't be directly serialized (`Arc<Font>`,
 //! Content in Tags, etc.). We handle this by:
 //!
 //! - **Fonts**: Referenced by a hash of their data bytes + collection index.
