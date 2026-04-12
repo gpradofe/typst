@@ -3,7 +3,6 @@
 mod document;
 mod flow;
 mod grid;
-pub mod page_store;
 mod image;
 mod inline;
 mod introspect;
@@ -11,6 +10,7 @@ mod lists;
 mod math;
 mod modifiers;
 mod pad;
+pub mod page_store;
 mod pages;
 mod repeat;
 mod rules;

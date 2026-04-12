@@ -9,8 +9,8 @@ use crate::engine::Engine;
 use crate::foundations::{
     Content, Packed, Smart, StyleChain, Synthesize, cast, elem, scope,
 };
-use crate::introspection::{Locatable, Tagged};
 use crate::foundations::{Target, TargetElem};
+use crate::introspection::{Locatable, Tagged};
 use crate::layout::resolve::{CellGrid, GridMeta, cached_table_cellgrid};
 use crate::layout::{
     Abs, Alignment, Celled, GridCell, GridFooter, GridHLine, GridHeader, GridVLine,

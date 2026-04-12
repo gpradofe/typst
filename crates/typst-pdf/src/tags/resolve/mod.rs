@@ -271,7 +271,8 @@ fn resolve_artifact_node(
     match &node {
         TagNode::Group(id) => {
             let idx = id.idx();
-            let mut bbox = rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
+            let mut bbox =
+                rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
             let group_children = rs.flat.children(idx);
 
             {
@@ -316,11 +317,15 @@ fn build_group_tag(rs: &mut Resolver, idx: usize) -> Option<TagKind> {
         ResolvedGroupKind::LogicalChild => TagSource::None,
         ResolvedGroupKind::Outline => TagSource::Direct(Tag::TOC.into()),
         ResolvedGroupKind::OutlineEntry => TagSource::Direct(Tag::TOCI.into()),
-        ResolvedGroupKind::Table(id) => TagSource::Direct(rs.ctx.tables.get(*id).build_tag()),
+        ResolvedGroupKind::Table(id) => {
+            TagSource::Direct(rs.ctx.tables.get(*id).build_tag())
+        }
         ResolvedGroupKind::TableCell(tag_id) => TagSource::TakeFromStorage(*tag_id),
         ResolvedGroupKind::Grid => TagSource::Direct(Tag::Div.into()),
         ResolvedGroupKind::GridCell => TagSource::Direct(Tag::Div.into()),
-        ResolvedGroupKind::List(numbering) => TagSource::Direct(Tag::L(*numbering).into()),
+        ResolvedGroupKind::List(numbering) => {
+            TagSource::Direct(Tag::L(*numbering).into())
+        }
         ResolvedGroupKind::ListItemLabel => TagSource::Direct(Tag::Lbl.into()),
         ResolvedGroupKind::ListItemBody => TagSource::Direct(Tag::LBody.into()),
         ResolvedGroupKind::TermsItemLabel => TagSource::Direct(Tag::Lbl.into()),
@@ -332,16 +337,16 @@ fn build_group_tag(rs: &mut Resolver, idx: usize) -> Option<TagKind> {
                 None => return None,
             }
         }
-        ResolvedGroupKind::Figure(id) => {
-            match rs.ctx.figures.get(*id).build_tag() {
-                Some(tag) => TagSource::Direct(tag),
-                None => return None,
-            }
-        }
+        ResolvedGroupKind::Figure(id) => match rs.ctx.figures.get(*id).build_tag() {
+            Some(tag) => TagSource::Direct(tag),
+            None => return None,
+        },
         ResolvedGroupKind::FigureCaption => TagSource::Direct(Tag::Caption.into()),
         ResolvedGroupKind::Image { alt } => {
             let alt = alt.as_ref().map(Into::into);
-            TagSource::Direct(Tag::Figure(alt).with_placement(Some(kt::Placement::Block)).into())
+            TagSource::Direct(
+                Tag::Figure(alt).with_placement(Some(kt::Placement::Block)).into(),
+            )
         }
         ResolvedGroupKind::Formula { alt, block } => {
             let alt = alt.as_ref().map(Into::into);

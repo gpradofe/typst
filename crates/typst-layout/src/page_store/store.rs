@@ -78,8 +78,7 @@ impl DiskPageStore {
         for page in pages {
             store.offsets.push(offset);
             let spage = store.convert_page(page);
-            let bytes = bincode::serialize(&spage)
-                .map_err(io::Error::other)?;
+            let bytes = bincode::serialize(&spage).map_err(io::Error::other)?;
             let len = bytes.len() as u64;
             writer.write_all(&len.to_le_bytes())?;
             writer.write_all(&bytes)?;
@@ -94,8 +93,7 @@ impl DiskPageStore {
     /// Appends a single page to the store.
     pub fn append_page(&mut self, page: &Page) -> io::Result<()> {
         let spage = self.convert_page(page);
-        let bytes = bincode::serialize(&spage)
-            .map_err(io::Error::other)?;
+        let bytes = bincode::serialize(&spage).map_err(io::Error::other)?;
 
         // Lazily create the buffered writer on first append.
         if self.writer.is_none() {
@@ -136,7 +134,10 @@ impl DiskPageStore {
     /// Reads a single page back from disk and reconstructs it.
     pub fn read_page(&self, index: usize) -> io::Result<Page> {
         if index >= self.page_count {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "page index out of range"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "page index out of range",
+            ));
         }
 
         let mut reader = BufReader::new(self.file.reopen()?);
@@ -163,7 +164,10 @@ impl DiskPageStore {
         if index == self.page_count - 1 && !self.remaining_tags.is_empty() {
             let pos = Point::with_y(page.frame.height());
             page.frame.push_multiple(
-                self.remaining_tags.iter().cloned().map(|tag| (pos, FrameItem::Tag(tag))),
+                self.remaining_tags
+                    .iter()
+                    .cloned()
+                    .map(|tag| (pos, FrameItem::Tag(tag))),
             );
         }
 
@@ -214,12 +218,13 @@ impl DiskPageStore {
         let fill = match spage.fill {
             None => Smart::Auto,
             Some(None) => Smart::Custom(None),
-            Some(Some(paint)) => Smart::Custom(Some(self.converter.reconstruct_paint(paint))),
+            Some(Some(paint)) => {
+                Smart::Custom(Some(self.converter.reconstruct_paint(paint)))
+            }
         };
 
-        let numbering = spage.numbering_ref.map(|id| {
-            self.numberings[id as usize].clone()
-        });
+        let numbering =
+            spage.numbering_ref.map(|id| self.numberings[id as usize].clone());
 
         let supplement = self.supplements[spage.supplement_ref as usize].clone();
 
@@ -267,7 +272,11 @@ impl Iterator for SequentialPageIterator<'_> {
             if is_last && !self.store.remaining_tags.is_empty() {
                 let pos = Point::with_y(page.frame.height());
                 page.frame.push_multiple(
-                    self.store.remaining_tags.iter().cloned().map(|tag| (pos, FrameItem::Tag(tag))),
+                    self.store
+                        .remaining_tags
+                        .iter()
+                        .cloned()
+                        .map(|tag| (pos, FrameItem::Tag(tag))),
                 );
             }
 

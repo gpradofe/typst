@@ -23,10 +23,13 @@ use typst_library::layout::{Abs, ColumnsElem, PageElem, Regions};
 
 use self::collect::{Item, collect};
 use self::finalize::finalize;
-use self::run::{LayoutedPage, layout_blank_page, layout_page_run, prepare_page_run_no_fragment, create_layouted_page};
-use crate::{Page, PagedDocument, PagedIntrospector, PagedIntrospectorBuilder};
+use self::run::{
+    LayoutedPage, create_layouted_page, layout_blank_page, layout_page_run,
+    prepare_page_run_no_fragment,
+};
 use crate::flow::{FlowMode, layout_flow_streaming};
 use crate::page_store::DiskPageStore;
+use crate::{Page, PagedDocument, PagedIntrospector, PagedIntrospectorBuilder};
 
 /// Layout content into a document.
 ///
@@ -174,9 +177,8 @@ fn layout_document_common(
         styles,
     )?;
 
-    let (pages, store, introspector) = layout_pages_streaming(
-        &mut engine, &mut children, &mut locator, styles,
-    )?;
+    let (pages, store, introspector) =
+        layout_pages_streaming(&mut engine, &mut children, &mut locator, styles)?;
 
     let mut doc = PagedDocument::new(pages, info);
     if let Some(introspector) = introspector {
@@ -230,32 +232,33 @@ fn layout_pages_streaming<'a>(
     // serializing it.
     let mut flushing = streaming;
     let mut store: Option<DiskPageStore> = if flushing {
-        Some(DiskPageStore::new()
-            .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
-            .at(typst_syntax::Span::detached())?)
+        Some(
+            DiskPageStore::new()
+                .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
+                .at(typst_syntax::Span::detached())?,
+        )
     } else {
         None
     };
-    let mut intro_builder: Option<PagedIntrospectorBuilder> = if flushing {
-        Some(PagedIntrospectorBuilder::with_capacity(0))
-    } else {
-        None
-    };
+    let mut intro_builder: Option<PagedIntrospectorBuilder> =
+        if flushing { Some(PagedIntrospectorBuilder::with_capacity(0)) } else { None };
 
     // Shared logic: process a single finalized page (flush or accumulate).
     let process_page = |page: Page,
-                            total_pages: &mut usize,
-                            pages: &mut EcoVec<Page>,
-                            store: &mut Option<DiskPageStore>,
-                            intro_builder: &mut Option<PagedIntrospectorBuilder>,
-                            flushing: &mut bool|
+                        total_pages: &mut usize,
+                        pages: &mut EcoVec<Page>,
+                        store: &mut Option<DiskPageStore>,
+                        intro_builder: &mut Option<PagedIntrospectorBuilder>,
+                        flushing: &mut bool|
      -> SourceResult<()> {
         // Start flushing mid-stream if threshold exceeded.
         // Only flush during iter1 (eviction enabled) or streaming mode.
         // In iter2, keep pages in memory for fast regular PDF export
         // instead of forcing the slower disk-backed pdf_streaming path.
-        if !*flushing && *total_pages + 1 > FLUSH_THRESHOLD
-            && typst_library::engine_flags::is_layout_eviction_enabled() {
+        if !*flushing
+            && *total_pages + 1 > FLUSH_THRESHOLD
+            && typst_library::engine_flags::is_layout_eviction_enabled()
+        {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
@@ -296,11 +299,8 @@ fn layout_pages_streaming<'a>(
             match item {
                 Item::Run(children, initial, run_locator) => {
                     // Prepare page styles without performing flow layout.
-                    let prepared = prepare_page_run_no_fragment(
-                        engine,
-                        children,
-                        *initial,
-                    );
+                    let prepared =
+                        prepare_page_run_no_fragment(engine, children, *initial);
 
                     // Compute content area from page size and margins.
                     let area = prepared.page_size - prepared.margin.sum_by_axis();
@@ -324,12 +324,13 @@ fn layout_pages_streaming<'a>(
                         FlowMode::Root,
                         &mut |engine, frame| {
                             let layouted = create_layouted_page(
-                                engine, frame, &prepared,
+                                engine,
+                                frame,
+                                &prepared,
                                 locator.next(&page_idx),
                             )?;
-                            let page = finalize(
-                                engine, &mut counter, &mut tags, layouted,
-                            )?;
+                            let page =
+                                finalize(engine, &mut counter, &mut tags, layouted)?;
                             process_page(
                                 page,
                                 &mut total_pages,
@@ -388,8 +389,7 @@ fn layout_pages_streaming<'a>(
                 Item::Run(..) => {
                     let layouted = runs.next().unwrap()?;
                     for layouted in layouted {
-                        let page =
-                            finalize(engine, &mut counter, &mut tags, layouted)?;
+                        let page = finalize(engine, &mut counter, &mut tags, layouted)?;
                         process_page(
                             page,
                             &mut total_pages,
@@ -457,7 +457,11 @@ fn layout_pages_streaming<'a>(
                 } else {
                     Abs::zero()
                 };
-                ib.discover_remaining_tags(total_pages.saturating_sub(1), &tags, page_height);
+                ib.discover_remaining_tags(
+                    total_pages.saturating_sub(1),
+                    &tags,
+                    page_height,
+                );
             }
             // Store remaining tags so they're injected when reading the last page.
             s.set_remaining_tags(tags);
@@ -473,4 +477,3 @@ fn layout_pages_streaming<'a>(
 
     Ok((pages, store, introspector))
 }
-

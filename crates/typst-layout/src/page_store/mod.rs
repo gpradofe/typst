@@ -21,16 +21,16 @@
 //!   store (rare in practice).
 //! - **Everything else**: Serialized directly via serde/bincode.
 
-mod types;
-mod store;
-mod registry;
 mod converter;
 mod frame_store;
+mod registry;
+mod store;
+mod types;
 
-pub use store::DiskPageStore;
-pub use registry::{FontRegistry, ImageRegistry};
 pub use converter::FrameConverter;
 pub use frame_store::{
     DiskFrameStore, MemoryFrameStore, SharedDiskStore, SubrangeFrameSource,
     SyncDiskFrameStore, SyncMemoryFrameStore,
 };
+pub use registry::{FontRegistry, ImageRegistry};
+pub use store::DiskPageStore;

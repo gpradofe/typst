@@ -33,9 +33,9 @@ pub struct SPoint {
 pub enum SFrameItem {
     Group(SGroupItem),
     Text(STextItem),
-    Shape(SShape, u64), // Span as raw u64
+    Shape(SShape, u64),              // Span as raw u64
     Image(SImageRef, f64, f64, u64), // width, height, span
-    Link(SDestination, f64, f64), // width, height
+    Link(SDestination, f64, f64),    // width, height
     Tag(STag),
 }
 
@@ -182,12 +182,12 @@ pub enum SPaint {
 
 #[derive(Serialize, Deserialize)]
 pub enum SColor {
-    Luma(f32, f32),          // value, alpha
+    Luma(f32, f32),            // value, alpha
     Oklab(f32, f32, f32, f32), // l, a, b, alpha
     Oklch(f32, f32, f32, f32), // l, c, h, alpha
     Rgb(f32, f32, f32, f32),   // r, g, b, alpha
     LinearRgb(f32, f32, f32, f32),
-    Cmyk(f32, f32, f32, f32),  // c, m, y, k (no alpha in CMYK)
+    Cmyk(f32, f32, f32, f32), // c, m, y, k (no alpha in CMYK)
     Hsl(f32, f32, f32, f32),
     Hsv(f32, f32, f32, f32),
 }
@@ -225,7 +225,7 @@ pub struct SPagedPosition {
 pub enum STag {
     /// References a Content stored in the TagStore by sequential ID.
     Start(u32, u128, STagFlags), // id, location, flags
-    End(u128, u128, STagFlags),  // location, key, flags
+    End(u128, u128, STagFlags), // location, key, flags
     /// Compact cell tag — stores CellTagMeta inline instead of Content.
     CellStart(SCellTagMeta, u128, STagFlags), // meta, location, flags
 }

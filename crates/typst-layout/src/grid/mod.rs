@@ -10,11 +10,14 @@ use std::sync::Arc;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, Smart, StyleChain};
-use typst_library::introspection::{CellTagMeta, Location, Locator, SplitLocator, Tag, TagFlags};
-use typst_library::layout::grid::resolve::{Cell, CellSource, cached_table_cellgrid, cached_grid_cellgrid, cellgrid_by_key};
+use typst_library::introspection::{
+    CellTagMeta, Location, Locator, SplitLocator, Tag, TagFlags,
+};
+use typst_library::layout::grid::resolve::{
+    Cell, CellSource, cached_grid_cellgrid, cached_table_cellgrid, cellgrid_by_key,
+};
 use typst_library::layout::{
-    Fragment, Frame, FrameItem, FrameParent, GridElem, Inherit,
-    Point, Regions, Sides,
+    Fragment, Frame, FrameItem, FrameParent, GridElem, Inherit, Point, Regions, Sides,
 };
 use typst_library::model::TableElem;
 
@@ -23,7 +26,6 @@ use self::lines::{
     LineSegment, generate_line_segments, hline_stroke_at_column, vline_stroke_at_row,
 };
 use self::rowspans::{Rowspan, UnbreakableRowGroup};
-
 
 /// Layout the cell into the given regions.
 ///
@@ -52,13 +54,22 @@ pub fn layout_cell(
     match &cell.source {
         Some(CellSource::Table { cell_x, cell_y, kind }) => {
             let meta = CellTagMeta::table(
-                *cell_x, *cell_y, cell.colspan, cell.rowspan, *kind, is_repeated,
+                *cell_x,
+                *cell_y,
+                cell.colspan,
+                cell.rowspan,
+                *kind,
+                is_repeated,
             );
             tags = Some(generate_cell_tags(meta, cell.source_span, &mut locator, engine));
         }
         Some(CellSource::Grid { cell_x, cell_y }) => {
             let meta = CellTagMeta::grid(
-                *cell_x, *cell_y, cell.colspan, cell.rowspan, is_repeated,
+                *cell_x,
+                *cell_y,
+                cell.colspan,
+                cell.rowspan,
+                is_repeated,
             );
             tags = Some(generate_cell_tags(meta, cell.source_span, &mut locator, engine));
         }
@@ -74,7 +85,8 @@ pub fn layout_cell(
     let body;
     let layout_body = if cell.apply_inset_align {
         let mut b = cell.body.clone();
-        let applied_inset = cell.resolved_inset
+        let applied_inset = cell
+            .resolved_inset
             .as_deref()
             .cloned()
             .unwrap_or_default()
@@ -111,9 +123,10 @@ fn apply_cell_tags(
                 let kind = first.kind();
                 let original = std::mem::replace(first, Frame::new(size, kind));
                 first.push(Point::zero(), FrameItem::Tag(start_tag));
-                first.push(Point::zero(), FrameItem::Group(
-                    typst_library::layout::GroupItem::new(original)
-                ));
+                first.push(
+                    Point::zero(),
+                    FrameItem::Group(typst_library::layout::GroupItem::new(original)),
+                );
                 first.push(Point::zero(), FrameItem::Tag(Tag::End(loc, key, flags)));
             } else {
                 first.prepend(Point::zero(), FrameItem::Tag(start_tag));

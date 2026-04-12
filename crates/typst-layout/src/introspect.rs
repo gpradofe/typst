@@ -61,7 +61,6 @@ impl PagedIntrospector {
     pub fn frame_link_targets(&self) -> &FxHashSet<Location> {
         &self.frame_link_targets
     }
-
 }
 
 impl Introspector for PagedIntrospector {
@@ -191,12 +190,14 @@ impl PagedIntrospectorBuilder {
 
     /// Discovers remaining tags that arrive after all pages have been produced.
     /// These tags are logically at the bottom of the last page.
-    pub fn discover_remaining_tags(&mut self, page_index: usize, tags: &[Tag], page_height: Abs) {
+    pub fn discover_remaining_tags(
+        &mut self,
+        page_index: usize,
+        tags: &[Tag],
+        page_height: Abs,
+    ) {
         let nr = NonZeroUsize::new(1 + page_index).unwrap();
-        let pos = PagedPosition {
-            page: nr,
-            point: Point::with_y(page_height),
-        };
+        let pos = PagedPosition { page: nr, point: Point::with_y(page_height) };
         for tag in tags {
             self.elements.discover_tag(tag, pos);
         }

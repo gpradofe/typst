@@ -65,7 +65,11 @@ impl FrameConverter {
         SFrame {
             width: frame.width().to_raw(),
             height: frame.height().to_raw(),
-            baseline: if frame.has_baseline() { Some(frame.baseline().to_raw()) } else { None },
+            baseline: if frame.has_baseline() {
+                Some(frame.baseline().to_raw())
+            } else {
+                None
+            },
             kind: match frame.kind() {
                 FrameKind::Soft => SFrameKind::Soft,
                 FrameKind::Hard => SFrameKind::Hard,
@@ -144,24 +148,30 @@ impl FrameConverter {
                 arr
             }),
             text: t.text.to_string(),
-            glyphs: t.glyphs.iter().map(|g| SGlyph {
-                id: g.id,
-                x_advance: g.x_advance.get(),
-                x_offset: g.x_offset.get(),
-                y_advance: g.y_advance.get(),
-                y_offset: g.y_offset.get(),
-                range_start: g.range.start,
-                range_end: g.range.end,
-                span: g.span.0.into_raw().get(),
-                span_offset: g.span.1,
-            }).collect(),
+            glyphs: t
+                .glyphs
+                .iter()
+                .map(|g| SGlyph {
+                    id: g.id,
+                    x_advance: g.x_advance.get(),
+                    x_offset: g.x_offset.get(),
+                    y_advance: g.y_advance.get(),
+                    y_offset: g.y_offset.get(),
+                    range_start: g.range.start,
+                    range_end: g.range.end,
+                    span: g.span.0.into_raw().get(),
+                    span_offset: g.span.1,
+                })
+                .collect(),
         }
     }
 
     pub fn convert_shape(&mut self, s: &Shape) -> SShape {
         SShape {
             geometry: match &s.geometry {
-                Geometry::Line(p) => SGeometry::Line(SPoint { x: p.x.to_raw(), y: p.y.to_raw() }),
+                Geometry::Line(p) => {
+                    SGeometry::Line(SPoint { x: p.x.to_raw(), y: p.y.to_raw() })
+                }
                 Geometry::Rect(sz) => SGeometry::Rect(sz.x.to_raw(), sz.y.to_raw()),
                 Geometry::Curve(c) => SGeometry::Curve(convert_curve(c)),
             },
@@ -229,10 +239,14 @@ impl FrameConverter {
             Tag::Start(content, loc, flags) => {
                 let id = self.tags.len() as u32;
                 self.tags.push(content.clone());
-                STag::Start(id, loc.hash(), STagFlags {
-                    introspectable: flags.introspectable,
-                    tagged: flags.tagged,
-                })
+                STag::Start(
+                    id,
+                    loc.hash(),
+                    STagFlags {
+                        introspectable: flags.introspectable,
+                        tagged: flags.tagged,
+                    },
+                )
             }
             Tag::End(loc, key, flags) => STag::End(
                 loc.hash(),
@@ -285,11 +299,15 @@ impl FrameConverter {
             frame.set_baseline(Abs::raw(b));
         }
 
-        let items: Vec<(Point, FrameItem)> = sf.items.into_iter().map(|(sp, si)| {
-            let point = Point::new(Abs::raw(sp.x), Abs::raw(sp.y));
-            let item = self.reconstruct_frame_item(si);
-            (point, item)
-        }).collect();
+        let items: Vec<(Point, FrameItem)> = sf
+            .items
+            .into_iter()
+            .map(|(sp, si)| {
+                let point = Point::new(Abs::raw(sp.x), Abs::raw(sp.y));
+                let item = self.reconstruct_frame_item(si);
+                (point, item)
+            })
+            .collect();
 
         frame.push_multiple(items);
         frame
@@ -303,13 +321,20 @@ impl FrameConverter {
                 FrameItem::Shape(self.reconstruct_shape(s), raw_to_span(span))
             }
             SFrameItem::Image(img_ref, w, h, span) => {
-                let image = self.images.resolve(img_ref.data_hash)
+                let image = self
+                    .images
+                    .resolve(img_ref.data_hash)
                     .expect("image not found in registry");
-                FrameItem::Image(image, Size::new(Abs::raw(w), Abs::raw(h)), raw_to_span(span))
+                FrameItem::Image(
+                    image,
+                    Size::new(Abs::raw(w), Abs::raw(h)),
+                    raw_to_span(span),
+                )
             }
-            SFrameItem::Link(dest, w, h) => {
-                FrameItem::Link(self.reconstruct_destination(dest), Size::new(Abs::raw(w), Abs::raw(h)))
-            }
+            SFrameItem::Link(dest, w, h) => FrameItem::Link(
+                self.reconstruct_destination(dest),
+                Size::new(Abs::raw(w), Abs::raw(h)),
+            ),
             SFrameItem::Tag(tag) => FrameItem::Tag(self.reconstruct_tag(tag)),
         }
     }
@@ -335,8 +360,7 @@ impl FrameConverter {
     }
 
     pub fn reconstruct_text(&self, st: STextItem) -> TextItem {
-        let font = self.fonts.resolve(&st.font_ref)
-            .expect("font not found in registry");
+        let font = self.fonts.resolve(&st.font_ref).expect("font not found in registry");
 
         TextItem {
             font,
@@ -353,23 +377,31 @@ impl FrameConverter {
                 s.parse::<Region>().ok()
             }),
             text: st.text.into(),
-            glyphs: st.glyphs.into_iter().map(|g| Glyph {
-                id: g.id,
-                x_advance: Em::new(g.x_advance),
-                x_offset: Em::new(g.x_offset),
-                y_advance: Em::new(g.y_advance),
-                y_offset: Em::new(g.y_offset),
-                range: g.range_start..g.range_end,
-                span: (raw_to_span(g.span), g.span_offset),
-            }).collect(),
+            glyphs: st
+                .glyphs
+                .into_iter()
+                .map(|g| Glyph {
+                    id: g.id,
+                    x_advance: Em::new(g.x_advance),
+                    x_offset: Em::new(g.x_offset),
+                    y_advance: Em::new(g.y_advance),
+                    y_offset: Em::new(g.y_offset),
+                    range: g.range_start..g.range_end,
+                    span: (raw_to_span(g.span), g.span_offset),
+                })
+                .collect(),
         }
     }
 
     pub fn reconstruct_shape(&self, ss: SShape) -> Shape {
         Shape {
             geometry: match ss.geometry {
-                SGeometry::Line(p) => Geometry::Line(Point::new(Abs::raw(p.x), Abs::raw(p.y))),
-                SGeometry::Rect(w, h) => Geometry::Rect(Size::new(Abs::raw(w), Abs::raw(h))),
+                SGeometry::Line(p) => {
+                    Geometry::Line(Point::new(Abs::raw(p.x), Abs::raw(p.y)))
+                }
+                SGeometry::Rect(w, h) => {
+                    Geometry::Rect(Size::new(Abs::raw(w), Abs::raw(h)))
+                }
                 SGeometry::Curve(c) => Geometry::Curve(reconstruct_curve(c)),
             },
             fill: ss.fill.map(|p| self.reconstruct_paint(p)),
@@ -396,10 +428,14 @@ impl FrameConverter {
                 SLineJoin::Bevel => LineJoin::Bevel,
             },
             dash: ss.dash.map(|d| DashPattern {
-                array: d.array.into_iter().map(|dl| match dl {
-                    SDashLength::LineWidth => Abs::zero(),
-                    SDashLength::Length(l) => Abs::raw(l),
-                }).collect(),
+                array: d
+                    .array
+                    .into_iter()
+                    .map(|dl| match dl {
+                        SDashLength::LineWidth => Abs::zero(),
+                        SDashLength::Length(l) => Abs::raw(l),
+                    })
+                    .collect(),
                 phase: Abs::raw(d.phase),
             }),
             miter_limit: Ratio::new(ss.miter_limit),
@@ -409,7 +445,9 @@ impl FrameConverter {
     pub fn reconstruct_paint(&self, sp: SPaint) -> Paint {
         match sp {
             SPaint::Solid(c) => Paint::Solid(reconstruct_color(c)),
-            SPaint::GradientRef(id) => Paint::Gradient(self.gradients[id as usize].clone()),
+            SPaint::GradientRef(id) => {
+                Paint::Gradient(self.gradients[id as usize].clone())
+            }
             SPaint::TilingRef(id) => Paint::Tiling(self.tilings[id as usize].clone()),
         }
     }
@@ -417,16 +455,17 @@ impl FrameConverter {
     pub fn reconstruct_destination(&self, sd: SDestination) -> Destination {
         match sd {
             SDestination::Url(url) => {
-                Destination::Url(typst_library::model::Url::new(&url).unwrap_or_else(|_| {
-                    typst_library::model::Url::new("about:blank").unwrap()
-                }))
+                Destination::Url(typst_library::model::Url::new(&url).unwrap_or_else(
+                    |_| typst_library::model::Url::new("about:blank").unwrap(),
+                ))
             }
-            SDestination::Position(pos) => Destination::Position(
-                typst_library::introspection::PagedPosition {
-                    page: std::num::NonZeroUsize::new(pos.page).unwrap_or(std::num::NonZeroUsize::MIN),
+            SDestination::Position(pos) => {
+                Destination::Position(typst_library::introspection::PagedPosition {
+                    page: std::num::NonZeroUsize::new(pos.page)
+                        .unwrap_or(std::num::NonZeroUsize::MIN),
                     point: Point::new(Abs::raw(pos.x), Abs::raw(pos.y)),
-                },
-            ),
+                })
+            }
             SDestination::Location(raw) => Destination::Location(Location::new(raw)),
         }
     }
@@ -435,10 +474,14 @@ impl FrameConverter {
         match st {
             STag::Start(id, loc, flags) => {
                 let content = self.tags[id as usize].clone();
-                Tag::Start(content, Location::new(loc), TagFlags {
-                    introspectable: flags.introspectable,
-                    tagged: flags.tagged,
-                })
+                Tag::Start(
+                    content,
+                    Location::new(loc),
+                    TagFlags {
+                        introspectable: flags.introspectable,
+                        tagged: flags.tagged,
+                    },
+                )
             }
             STag::End(loc, key, flags) => Tag::End(
                 Location::new(loc),
@@ -452,7 +495,10 @@ impl FrameConverter {
                 let kind = match smeta.kind {
                     0 => CellTagKind::GridCell,
                     1 => CellTagKind::TableData,
-                    2 => CellTagKind::TableHeader { level: smeta.level, scope: smeta.scope },
+                    2 => CellTagKind::TableHeader {
+                        level: smeta.level,
+                        scope: smeta.scope,
+                    },
                     3 => CellTagKind::TableFooter,
                     _ => CellTagKind::Repeated,
                 };
@@ -463,10 +509,14 @@ impl FrameConverter {
                     rowspan: smeta.rowspan,
                     kind,
                 };
-                Tag::CellStart(meta, Location::new(loc), TagFlags {
-                    introspectable: flags.introspectable,
-                    tagged: flags.tagged,
-                })
+                Tag::CellStart(
+                    meta,
+                    Location::new(loc),
+                    TagFlags {
+                        introspectable: flags.introspectable,
+                        tagged: flags.tagged,
+                    },
+                )
             }
         }
     }
@@ -489,44 +539,55 @@ pub fn reconstruct_color(sc: SColor) -> Color {
         SColor::Rgb(r, g, b, a) => Color::Rgb(Rgb::new(r, g, b, a)),
         SColor::LinearRgb(r, g, b, a) => Color::LinearRgb(LinearRgb::new(r, g, b, a)),
         SColor::Cmyk(c, m, y, k) => Color::Cmyk(Cmyk { c, m, y, k }),
-        SColor::Hsl(h, s, l, a) => {
-            Color::Oklab(Oklab::new(l, h, s, a))
-        }
-        SColor::Hsv(h, s, v, a) => {
-            Color::Oklab(Oklab::new(v, h, s, a))
-        }
+        SColor::Hsl(h, s, l, a) => Color::Oklab(Oklab::new(l, h, s, a)),
+        SColor::Hsv(h, s, v, a) => Color::Oklab(Oklab::new(v, h, s, a)),
     }
 }
 
 pub fn reconstruct_curve(sc: SCurve) -> Curve {
-    let items: Vec<CurveItem> = sc.0.into_iter().map(|item| match item {
-        SCurveItem::Move(p) => CurveItem::Move(Point::new(Abs::raw(p.x), Abs::raw(p.y))),
-        SCurveItem::Line(p) => CurveItem::Line(Point::new(Abs::raw(p.x), Abs::raw(p.y))),
-        SCurveItem::Cubic(a, b, c) => CurveItem::Cubic(
-            Point::new(Abs::raw(a.x), Abs::raw(a.y)),
-            Point::new(Abs::raw(b.x), Abs::raw(b.y)),
-            Point::new(Abs::raw(c.x), Abs::raw(c.y)),
-        ),
-        SCurveItem::Close => CurveItem::Close,
-    }).collect();
+    let items: Vec<CurveItem> =
+        sc.0.into_iter()
+            .map(|item| match item {
+                SCurveItem::Move(p) => {
+                    CurveItem::Move(Point::new(Abs::raw(p.x), Abs::raw(p.y)))
+                }
+                SCurveItem::Line(p) => {
+                    CurveItem::Line(Point::new(Abs::raw(p.x), Abs::raw(p.y)))
+                }
+                SCurveItem::Cubic(a, b, c) => CurveItem::Cubic(
+                    Point::new(Abs::raw(a.x), Abs::raw(a.y)),
+                    Point::new(Abs::raw(b.x), Abs::raw(b.y)),
+                    Point::new(Abs::raw(c.x), Abs::raw(c.y)),
+                ),
+                SCurveItem::Close => CurveItem::Close,
+            })
+            .collect();
     Curve(items)
 }
 
 pub fn convert_curve(c: &Curve) -> SCurve {
-    SCurve(c.0.iter().map(|item| match *item {
-        CurveItem::Move(p) => SCurveItem::Move(SPoint { x: p.x.to_raw(), y: p.y.to_raw() }),
-        CurveItem::Line(p) => SCurveItem::Line(SPoint { x: p.x.to_raw(), y: p.y.to_raw() }),
-        CurveItem::Cubic(a, b, c) => SCurveItem::Cubic(
-            SPoint { x: a.x.to_raw(), y: a.y.to_raw() },
-            SPoint { x: b.x.to_raw(), y: b.y.to_raw() },
-            SPoint { x: c.x.to_raw(), y: c.y.to_raw() },
-        ),
-        CurveItem::Close => SCurveItem::Close,
-    }).collect())
+    SCurve(
+        c.0.iter()
+            .map(|item| match *item {
+                CurveItem::Move(p) => {
+                    SCurveItem::Move(SPoint { x: p.x.to_raw(), y: p.y.to_raw() })
+                }
+                CurveItem::Line(p) => {
+                    SCurveItem::Line(SPoint { x: p.x.to_raw(), y: p.y.to_raw() })
+                }
+                CurveItem::Cubic(a, b, c) => SCurveItem::Cubic(
+                    SPoint { x: a.x.to_raw(), y: a.y.to_raw() },
+                    SPoint { x: b.x.to_raw(), y: b.y.to_raw() },
+                    SPoint { x: c.x.to_raw(), y: c.y.to_raw() },
+                ),
+                CurveItem::Close => SCurveItem::Close,
+            })
+            .collect(),
+    )
 }
 
 pub fn raw_to_span(raw: u64) -> typst_syntax::Span {
-    typst_syntax::Span::from_raw(std::num::NonZeroU64::new(raw).unwrap_or(
-        std::num::NonZeroU64::new(1).unwrap()
-    ))
+    typst_syntax::Span::from_raw(
+        std::num::NonZeroU64::new(raw).unwrap_or(std::num::NonZeroU64::new(1).unwrap()),
+    )
 }

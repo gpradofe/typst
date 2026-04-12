@@ -169,7 +169,8 @@ fn convert_pages_from_store(
     store: &typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<()> {
     // Use sequential iterator for efficient buffered reading.
-    let page_iter = store.pages_iter()
+    let page_iter = store
+        .pages_iter()
         .map_err(|e| ecow::eco_format!("failed to open page store: {e}"))
         .at(Span::detached())?;
 

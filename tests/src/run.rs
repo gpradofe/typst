@@ -525,7 +525,9 @@ impl<'a> Runner<'a> {
                         #[cfg(target_family = "windows")]
                         {
                             // Try symlink first, fall back to copy if lacking privileges
-                            if std::os::windows::fs::symlink_file(&link_path, &live_path).is_err() {
+                            if std::os::windows::fs::symlink_file(&link_path, &live_path)
+                                .is_err()
+                            {
                                 std::fs::copy(&hash_path, &live_path).ok();
                             }
                         }
