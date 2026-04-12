@@ -251,10 +251,11 @@ fn layout_pages_streaming<'a>(
                             spilling: &mut bool|
      -> SourceResult<()> {
         // Start spilling mid-stream if threshold exceeded.
-        // Spill in both convergence and streaming modes. Page-run
-        // memoization is disabled during convergence, so page frames
-        // are not cached by comemo. Spilling frees them.
-        if !*spilling && *total_pages + 1 > SPILL_THRESHOLD {
+        // Only spill during iter1 (eviction enabled) or streaming mode.
+        // In iter2, keep pages in memory for fast regular PDF export
+        // instead of forcing the slower disk-backed pdf_streaming path.
+        if !*spilling && *total_pages + 1 > SPILL_THRESHOLD
+            && typst_library::engine_flags::is_layout_eviction_enabled() {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
