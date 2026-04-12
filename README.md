@@ -62,15 +62,19 @@ Tested on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three tabl
   <img alt="Memory Comparison" src="benchmarks/memory_comparison.png" width="800">
 </p>
 
-### The Optimized Binary Scales Further
+### Scaling Beyond 100K Rows
 
-The optimized binary successfully compiles documents the original cannot handle at all:
+The original binary can technically handle 300K rows but requires ~45 GB of RAM. The optimized binary compiles the same documents in a fraction of the memory:
 
-| Rows | Simple Table | Single Table (Adv.) | Multi-Table |
-|------|-------------|-------------------|-------------|
-| 300K | 6.8 GB / 54s | 10.1 GB / 69s | 10.9 GB / 116s |
-| 600K | 13.6 GB / 126s | 20.2 GB / 172s | 21.6 GB / 540s |
-| 1.2M | 27.6 GB / 7m | 40.5 GB / 11m | *(exceeds practical limits)* |
+| Rows | Template | Original RAM | Optimized RAM | Reduction | Optimized Time |
+|------|----------|-------------|--------------|-----------|---------------|
+| 300K | Simple | 45.1 GB | **6.8 GB** | **85%** | 54s |
+| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 69s |
+| 300K | Multi-Table | — | **10.9 GB** | — | 116s |
+| 600K | Simple | — | **13.6 GB** | — | 126s |
+| 600K | Single Adv. | — | **20.2 GB** | — | 172s |
+
+> **Note:** Scaling is approximately linear up to 600K rows. Beyond that, time grows super-linearly (e.g., 1.2M rows takes ~7 min for simple tables, ~11 min for advanced) due to memory pressure effects at 27-40 GB RSS. Multi-table documents scale less efficiently because each department group creates a separate table element.
 
 <p align="center">
   <a href="BENCHMARKS.md"><strong>View full benchmark report with all graphs and methodology &rarr;</strong></a>
