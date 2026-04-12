@@ -206,7 +206,7 @@ fn compile_impl<T: Output>(
                 }
                 let _guard = StreamingGuard;
 
-                let streaming_result = (|| -> SourceResult<T> {
+                let streaming_result: SourceResult<T> = {
                     let constraint2 = comemo::Constraint::new();
                     let mut subsink2 = Sink::new();
                     let mut engine2 = Engine {
@@ -223,7 +223,7 @@ fn compile_impl<T: Output>(
                     let result = T::create(&mut engine2, &content, styles);
                     sink.extend_from_sink(subsink2);
                     result
-                })();
+                };
 
                 // Replace the converged document with the streaming one.
                 // The old document (with dropped pages) is dropped here.
