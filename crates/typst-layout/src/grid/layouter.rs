@@ -152,6 +152,15 @@ pub struct GridLayouter<'a> {
     pub(super) row_state: RowState,
     /// The span of the grid element.
     pub(super) span: Span,
+    /// Pre-computed cell frames for parallel multi-row batching.
+    /// Key: (row_y, col_x), Value: laid out Frame.
+    /// Populated by `pre_compute_row_chunk` and consumed by
+    /// `try_layout_auto_row_combined`.
+    pre_computed_cells: FxHashMap<(usize, usize), Frame>,
+    /// End row (exclusive) of the current pre-computation chunk.
+    /// When `y >= pre_compute_chunk_end`, the current chunk is exhausted
+    /// and a new one should be computed.
+    pre_compute_chunk_end: usize,
 }
 
 /// Grid layout state for the current region. This should be reset or updated
@@ -372,6 +381,8 @@ impl<'a> GridLayouter<'a> {
                 footer_height: Abs::zero(),
             },
             span,
+            pre_computed_cells: FxHashMap::default(),
+            pre_compute_chunk_end: 0,
         }
     }
 
@@ -1523,12 +1534,22 @@ impl<'a> GridLayouter<'a> {
         if self.unbreakable_rows_left == 0
             && self.grid.entries.len() >= 100
         {
+            // Trigger parallel pre-computation for upcoming rows when the
+            // current chunk is exhausted. This batches 200+ cells across
+            // multiple rows for parallel layout via engine.parallelize().
+            if self.pre_computed_cells.is_empty() || y >= self.pre_compute_chunk_end {
+                self.pre_computed_cells.clear();
+                self.pre_compute_row_chunk(engine, y)?;
+            }
+
             if let Some(result) = self.try_layout_auto_row_combined(engine, disambiguator, y)? {
                 match result {
                     CombinedRowResult::Done => return Ok(()),
                     CombinedRowResult::SkipRegion => {
                         self.finish_region(engine, false)?;
-                        // Fall through to standard path for re-measurement
+                        // Fall through to standard path for re-measurement.
+                        // Don't clear pre-computed cells — they are valid
+                        // for later rows after the region break.
                     }
                 }
             }
@@ -1906,6 +1927,215 @@ impl<'a> GridLayouter<'a> {
         Ok(output)
     }
 
+    /// Pre-compute cell layouts for a chunk of consecutive auto rows in
+    /// parallel. Scans ahead from `start_y`, collecting cells from auto rows
+    /// without rowspans, then lays them all out via `engine.parallelize()`.
+    /// Results are stored in `self.pre_computed_cells` for consumption by
+    /// `try_layout_auto_row_combined`.
+    fn pre_compute_row_chunk(
+        &mut self,
+        engine: &mut Engine,
+        start_y: usize,
+    ) -> SourceResult<()> {
+        const MIN_CELLS_FOR_PARALLEL: usize = 200;
+        const MAX_CHUNK_ROWS: usize = 500;
+
+        // Collect work items: (x, y, cell, cell_width, locator)
+        let mut work_items: Vec<(usize, usize, &Cell, Abs, Locator)> = Vec::new();
+        let mut y = start_y;
+        let mut rows_collected = 0;
+
+        while y < self.grid.rows.len() && rows_collected < MAX_CHUNK_ROWS {
+            // Stop at upcoming headers.
+            if let Some(next_header) = self.upcoming_headers.first() {
+                if y >= next_header.range.start {
+                    break;
+                }
+            }
+            // Stop at repeated footers.
+            if let Some(footer) = &self.grid.footer {
+                if footer.repeated && y >= footer.start {
+                    break;
+                }
+            }
+
+            // Skip gutter rows.
+            if self.grid.is_gutter_track(y) {
+                y += 1;
+                continue;
+            }
+
+            // Only auto rows can use the combined path.
+            if !matches!(self.grid.rows[y], Sizing::Auto) {
+                break;
+            }
+
+            // Collect cells for this row, checking for rowspans.
+            let row_start = work_items.len();
+            let mut has_rowspan = false;
+
+            for x in 0..self.rcols.len() {
+                let Some(parent) = self.grid.parent_cell_position(x, y) else {
+                    continue;
+                };
+                if parent.x != x {
+                    continue;
+                }
+                let cell = self.grid.cell(parent.x, parent.y).unwrap();
+                if self.grid.effective_rowspan_of_cell(cell) > 1 {
+                    has_rowspan = true;
+                    break;
+                }
+                let width = self.cell_spanned_width(cell, parent.x);
+                let locator = self.cell_locator(parent, 0);
+                work_items.push((parent.x, y, cell, width, locator));
+            }
+
+            if has_rowspan {
+                work_items.truncate(row_start);
+                break;
+            }
+
+            rows_collected += 1;
+            y += 1;
+        }
+
+        // Record the end of this chunk so we know when to re-trigger.
+        self.pre_compute_chunk_end = y;
+
+        if work_items.len() < MIN_CELLS_FOR_PARALLEL {
+            return Ok(());
+        }
+
+        // Compute shared pod parameters (same for all rowspan==1 cells).
+        let pod_height = self.regions.size.y;
+        let pod_full = self.regions.full;
+        let expand = self.regions.expand;
+        let styles = self.styles;
+        let is_repeated = self.row_state.is_being_repeated;
+
+        // Compute shared backlog, adjusting for headers/footers.
+        let shared_backlog: Vec<Abs>;
+        let last: Option<Abs>;
+        if !self.repeating_headers.is_empty()
+            || !self.pending_headers.is_empty()
+            || matches!(&self.grid.footer, Some(footer) if footer.repeated)
+        {
+            let mut backlog_buf: Vec<Abs> = vec![];
+            let mapped = self.regions.map(&mut backlog_buf, |size| {
+                Size::new(
+                    size.x,
+                    size.y
+                        - self.current.repeating_header_height
+                        - self.current.footer_height,
+                )
+            });
+            last = mapped.last;
+            shared_backlog = backlog_buf;
+        } else {
+            shared_backlog = self.regions.backlog.to_vec();
+            last = self.regions.last;
+        }
+        let backlog_ref: &[Abs] = &shared_backlog;
+
+        // Parallel layout of all cells in the chunk.
+        let results: Vec<_> = engine
+            .parallelize(work_items.into_iter(), move |engine, (x, y, cell, width, locator)| {
+                let size = Size::new(width, pod_height);
+                let mut pod: Regions = Region::new(size, expand).into();
+                pod.backlog = backlog_ref;
+                pod.full = pod_full;
+                pod.last = last;
+
+                layout_cell(cell, engine, locator, styles, pod, is_repeated)
+                    .map(|frag| {
+                        let frames = frag.into_frames();
+                        (x, y, frames)
+                    })
+            })
+            .collect();
+
+        // Store only single-region results (multi-region cells fall through
+        // to the standard path).
+        for result in results {
+            let (x, y, frames) = result?;
+            if frames.len() == 1 {
+                self.pre_computed_cells
+                    .insert((y, x), frames.into_iter().next().unwrap());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Try to assemble a row from pre-computed cell frames.
+    /// Returns `Some(Done)` if all cells for the row were pre-computed and the
+    /// row fits in the current region. Returns `None` otherwise, leaving
+    /// pre-computed entries untouched for non-matching cells.
+    fn try_use_pre_computed_row(&mut self, y: usize) -> Option<CombinedRowResult> {
+        // Phase 1: Check that ALL cells exist and compute max height.
+        let mut max_height = Abs::zero();
+        let mut cells_info: Vec<(usize, Abs)> = Vec::new(); // (x, width)
+
+        for x in 0..self.rcols.len() {
+            let Some(parent) = self.grid.parent_cell_position(x, y) else {
+                continue; // Skip gutter columns.
+            };
+            if parent.x != x {
+                continue;
+            }
+            let frame = self.pre_computed_cells.get(&(y, parent.x))?;
+            let cell = self.grid.cell(parent.x, parent.y).unwrap();
+            let width = self.cell_spanned_width(cell, parent.x);
+            max_height.set_max(frame.height());
+            cells_info.push((parent.x, width));
+        }
+
+        // Check fit in current region.
+        if !max_height.is_finite() || !self.width.is_finite() {
+            return None;
+        }
+        if max_height > self.regions.size.y {
+            return None;
+        }
+
+        // Phase 2: Extract frames and build output.
+        let mut output = Frame::soft(Size::new(self.width, max_height));
+        let mut offset = Point::zero();
+
+        let cell_frames: Vec<(usize, Abs, Frame)> = cells_info
+            .into_iter()
+            .map(|(x, width)| {
+                let frame = self.pre_computed_cells.remove(&(y, x)).unwrap();
+                (x, width, frame)
+            })
+            .collect();
+
+        let mut frame_iter = cell_frames.into_iter().peekable();
+
+        for (x, &rcol) in self.rcols.iter().enumerate() {
+            if let Some((cx, _, _)) = frame_iter.peek() {
+                if *cx == x {
+                    let (_, width, mut frame) = frame_iter.next().unwrap();
+                    frame.size_mut().y = max_height;
+                    let mut pos = offset;
+                    if self.is_rtl {
+                        pos.x = self.width - (pos.x + width);
+                    }
+                    output.push_frame(pos, frame);
+                }
+            }
+            offset.x += rcol;
+        }
+
+        self.push_row(output, y, true);
+        if let Some(row_height) = &mut self.row_state.current_row_height {
+            *row_height += max_height;
+        }
+
+        Some(CombinedRowResult::Done)
+    }
+
     /// Combined measure + layout for a single auto row. Returns:
     /// - `Ok(Some(Done))` if the row was fully laid out (single region, no issues)
     /// - `Ok(Some(SkipRegion))` if the row needs a region skip (empty first frame)
@@ -1919,6 +2149,15 @@ impl<'a> GridLayouter<'a> {
         let breakable = self.unbreakable_rows_left == 0;
         if !breakable {
             return Ok(None);
+        }
+
+        // Try pre-computed cells first (from parallel multi-row batching).
+        if !self.pre_computed_cells.is_empty() {
+            if let Some(result) = self.try_use_pre_computed_row(y) {
+                return Ok(Some(result));
+            }
+            // Row couldn't use pre-computed cells — don't clear remaining
+            // entries, they may be valid for later rows after a region break.
         }
 
         // Collect cell frames from a single layout pass.
