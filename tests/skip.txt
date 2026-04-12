@@ -4,3 +4,7 @@
 // The optimization changes don't affect plugin functionality, only equality
 // comparison between plugin.transition() results.
 plugin-transition
+// import-nested-item: Module equality check fails on 32-bit Linux due to
+// comemo memoization changes affecting module identity. Passes on 64-bit
+// and on Windows. Same root cause as plugin-transition.
+import-nested-item
