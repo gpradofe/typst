@@ -1,0 +1,125 @@
+{
+  "system": {
+    "platform": "Windows-11-10.0.26100-SP0",
+    "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "cpu_count": 32,
+    "total_ram_gb": 127.8,
+    "python_version": "3.12.6",
+    "timestamp": "2026-04-12T19:58:14.372523"
+  },
+  "templates": {
+    "simple": {
+      "description": "Plain 10-column table, no styling",
+      "data_format": "simple"
+    },
+    "single-table-advanced": {
+      "description": "Single giant table with group headers, styling, page headers/footers",
+      "data_format": "advanced"
+    },
+    "multi-table": {
+      "description": "Multiple tables (one per group), headers/footers, alternating fills",
+      "data_format": "advanced"
+    }
+  },
+  "binaries": {
+    "optimized": "C:\\Users\\Gustavo Aniceto\\source\\repos\\typst-research\\typst-source\\target\\release\\typst.exe"
+  },
+  "results": [
+    {
+      "binary": "optimized",
+      "template": "simple",
+      "rows": 300000,
+      "data_size_mb": 72.88,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 58.27,
+      "peak_ram_mb": 6817.1,
+      "peak_ram_bytes": 7148228608,
+      "pdf_size_mb": 749.14,
+      "pdf_size_bytes": 785531240,
+      "samples": 1093,
+      "error": null
+    },
+    {
+      "binary": "optimized",
+      "template": "single-table-advanced",
+      "rows": 300000,
+      "data_size_mb": 105.9,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 82.72,
+      "peak_ram_mb": 10108.2,
+      "peak_ram_bytes": 10599198720,
+      "pdf_size_mb": 922.5,
+      "pdf_size_bytes": 967316171,
+      "samples": 1571,
+      "error": null
+    },
+    {
+      "binary": "optimized",
+      "template": "multi-table",
+      "rows": 300000,
+      "data_size_mb": 105.9,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 120.89,
+      "peak_ram_mb": 10910.9,
+      "peak_ram_bytes": 11440898048,
+      "pdf_size_mb": 917.06,
+      "pdf_size_bytes": 961604153,
+      "samples": 2356,
+      "error": null
+    },
+    {
+      "binary": "optimized",
+      "template": "simple",
+      "rows": 600000,
+      "data_size_mb": 146.07,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 144.77,
+      "peak_ram_mb": 13662.6,
+      "peak_ram_bytes": 14326288384,
+      "pdf_size_mb": 1502.23,
+      "pdf_size_bytes": 1575198418,
+      "samples": 2621,
+      "error": null
+    },
+    {
+      "binary": "optimized",
+      "template": "single-table-advanced",
+      "rows": 600000,
+      "data_size_mb": 212.02,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 213.97,
+      "peak_ram_mb": 20162.7,
+      "peak_ram_bytes": 21142106112,
+      "pdf_size_mb": 1848.66,
+      "pdf_size_bytes": 1938463335,
+      "samples": 3928,
+      "error": null
+    },
+    {
+      "binary": "optimized",
+      "template": "multi-table",
+      "rows": 600000,
+      "data_size_mb": 212.02,
+      "run": 0,
+      "skipped": false,
+      "ok": true,
+      "time_s": 542.67,
+      "peak_ram_mb": 21720.9,
+      "peak_ram_bytes": 22776057856,
+      "pdf_size_mb": 1837.77,
+      "pdf_size_bytes": 1927040448,
+      "samples": 10266,
+      "error": null
+    }
+  ]
+}
