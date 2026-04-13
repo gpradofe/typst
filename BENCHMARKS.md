@@ -15,7 +15,7 @@ At **100,000 rows** (the largest size practical for both binaries):
 | **Multi-Table (Advanced)** — Peak RAM | 14,706 MB | 3,696 MB | **75% reduction** |
 | **Multi-Table (Advanced)** — Time | 36.4s | 27.8s | **1.3x faster** |
 
-The optimized binary scales to **1.2 million rows** (producing 3+ GB PDFs). The original binary can handle 300K rows but requires ~45 GB of RAM.
+At **600,000 rows**, the original binary requires **~90 GB of RAM** while the optimized binary uses **14-22 GB** — the same 75-85% reduction. Speedup reaches **5.6x** for single-table-advanced at this scale. The optimized binary further scales to **1.2 million rows** (producing 3+ GB PDFs).
 
 ## Overview
 
@@ -89,22 +89,31 @@ The optimized binary scales to 1.2M rows, producing 3+ GB PDFs. Scaling is appro
 | Multi-Table | 50,000 | 7,528 | 1,887 | 75% | 17.39s | 12.36s | 1.4x |
 | Multi-Table | 100,000 | 14,706 | 3,696 | 75% | 36.44s | 27.77s | 1.3x |
 
-### Large Scale (300K+ rows)
+### Large Scale (300K–600K rows, Original vs Optimized)
+
+| Template | Rows | Orig RAM (MB) | Opt RAM (MB) | RAM Saved | Orig Time | Opt Time | Speedup |
+|----------|------|---------------|--------------|-----------|-----------|----------|---------|
+| Simple | 300,000 | 45,160 | 6,819 | 85% | 151.0s | 53.8s | 2.8x |
+| Simple | 600,000 | 89,972 | 13,645 | 85% | 471.3s | 125.8s | 3.7x |
+| Single Adv. | 300,000 | 45,482 | 10,105 | 78% | 193.6s | 69.4s | 2.8x |
+| Single Adv. | 600,000 | 89,862 | 20,167 | 78% | 965.4s | 171.6s | 5.6x |
+| Multi-Table | 300,000 | 41,949 | 10,889 | 74% | 115.6s | 116.0s | 1.0x |
+| Multi-Table | 600,000 | 81,591 | 21,636 | 73% | 285.5s | 540.1s | 0.5x |
+
+### Optimized-Only (1.2M rows)
 
 | Template | Rows | Optimized RAM (MB) | Optimized Time | PDF Size |
 |----------|------|--------------------|----------------|----------|
-| Simple | 300,000 | 6,819 | 53.8s | 749 MB |
-| Simple | 600,000 | 13,645 | 125.8s | 1,502 MB |
 | Simple | 1,200,000 | 27,601 | 417.1s | 3,087 MB |
-| Single Adv. | 300,000 | 10,105 | 69.4s | 923 MB |
-| Single Adv. | 600,000 | 20,167 | 171.6s | 1,849 MB |
 | Single Adv. | 1,200,000 | 40,502 | 638.7s | 3,741 MB |
-| Multi-Table | 300,000 | 10,889 | 116.0s | 917 MB |
-| Multi-Table | 600,000 | 21,636 | 540.1s | 1,838 MB |
 
-For reference, the original binary at 300K rows requires ~45 GB of RAM (measured separately via `profile_final.py`). It was not included in the formal benchmark suite at this scale due to the extreme memory requirements.
+The original binary was not tested at 1.2M rows due to projected memory requirements (~180 GB).
 
-> **Note on scaling:** Time scales approximately linearly from 300K to 600K rows (~2x), but super-linearly from 600K to 1.2M rows (~3.3x for simple, ~3.7x for advanced). This is likely due to memory pressure effects — at 27-40 GB RSS, the OS memory manager introduces overhead. Multi-Table at 600K rows already shows this effect (540s vs the expected ~230s), because each of the ~12,000 separate table elements adds overhead.
+> **Note on scaling:** For the original binary, RAM scales approximately linearly (~2x from 300K→600K), peaking at ~90 GB for simple/advanced tables at 600K rows. Time scaling is super-linear for single-table-advanced (5x from 300K→600K) due to the convergence loop operating over very large pages.
+>
+> For the optimized binary, RAM and time scale approximately linearly from 300K to 600K rows. Beyond 600K to 1.2M rows, time grows super-linearly (~3.3x for simple, ~3.7x for advanced) due to memory pressure effects at 27-40 GB RSS.
+>
+> Multi-Table at 600K rows shows an anomaly: the optimized binary is **slower** than the original (540s vs 285s). This is because the multi-table template creates ~12,000 separate table elements, and the optimized binary's periodic comemo eviction destroys cross-table cache hits, causing redundant recomputation. The memory savings (73%) remain substantial despite the time regression.
 >
 > Multi-Table at 1.2M rows was excluded — it requires ~40+ GB RAM and PDF serialization becomes impractical with ~25,000 separate table elements.
 

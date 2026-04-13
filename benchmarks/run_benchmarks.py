@@ -70,7 +70,7 @@ QUICK_SIZES = [100, 1_000, 10_000, 50_000, 100_000]
 
 # Original binary can't handle very large documents (runs out of memory / too slow).
 # We set per-size timeouts and skip the original for very large sizes.
-ORIGINAL_MAX_SIZE = 300_000    # Don't run original above this
+ORIGINAL_MAX_SIZE = 600_000    # Don't run original above this
 TIMEOUT_PER_SIZE = {
     100: 60,
     1_000: 120,
