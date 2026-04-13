@@ -24,7 +24,7 @@ use typst_library::diag::{
     At, ExpectInternal, SourceDiagnostic, SourceResult, assert_internal, bail, error,
     panic_internal,
 };
-use typst_library::foundations::{Content, ContextElem, Packed, Smart};
+use typst_library::foundations::{Content, ContextElem};
 use typst_library::introspection::{CellTagKind, CellTagMeta, Location};
 use typst_library::layout::{
     Frame, FrameItem, FrameParent, GridCell, GridElem, GroupItem, HideElem, Inherit,
@@ -47,7 +47,7 @@ use typst_syntax::Span;
 use crate::PdfOptions;
 use crate::tags::GroupId;
 use crate::tags::context::{Ctx, FigureCtx, GridCtx, ListCtx, OutlineCtx, TableCtx};
-use crate::tags::groups::{BreakOpportunity, BreakPriority, GroupKind, Groups};
+use crate::tags::groups::{BreakOpportunity, BreakPriority, CellInfo, GroupKind, Groups};
 use crate::tags::tree::text::TextAttr;
 use crate::tags::tree::{Break, TraversalStates, Tree, Unfinished};
 use crate::tags::util::{ArtifactKindExt, PropertyValCopied};
@@ -369,30 +369,18 @@ fn visit_start_tag(tree: &mut TreeBuilder, elem: &Content, loc: Location) {
 }
 
 fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Location) {
-    use std::num::NonZeroUsize;
+    use crate::tags::groups::CellInfo;
 
     let kind = if matches!(meta.kind, CellTagKind::Repeated) {
         // Repeated cells (header/footer repeats) are artifacts.
         GroupKind::Artifact(ArtifactType::Other)
     } else if meta.is_table() {
-        // Table cell: construct a temporary Packed<TableCell> with the metadata.
-        let cell = Packed::new(
-            TableCell::new(Content::default())
-                .with_x(Smart::Custom(meta.x as usize))
-                .with_y(Smart::Custom(meta.y as usize))
-                .with_colspan(
-                    NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN),
-                )
-                .with_rowspan(
-                    NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN),
-                )
-                .with_kind(meta.to_table_cell_kind()),
-        );
-
+        // Table cell: use lightweight CellInfo instead of allocating Packed<TableCell>.
+        let info = CellInfo::from_cell_tag_meta(meta);
         let tag = tree.groups.tags.push(Tag::TD);
-        GroupKind::TableCell(cell, tag, None)
+        GroupKind::TableCell(info, tag, None)
     } else {
-        // Grid cell: construct a temporary Packed<GridCell>.
+        // Grid cell: use lightweight CellInfo instead of allocating Packed<GridCell>.
         if !matches!(tree.parent_kind(), GroupKind::Grid(..)) {
             // If there is no grid parent, this means a grid layouter is used
             // internally. Use transparent.
@@ -400,19 +388,8 @@ fn visit_cell_start_tag(tree: &mut TreeBuilder, meta: &CellTagMeta, loc: Locatio
             tree.progressions.push(group_id);
             return;
         }
-        let cell = Packed::new(
-            GridCell::new(Content::default())
-                .with_x(Smart::Custom(meta.x as usize))
-                .with_y(Smart::Custom(meta.y as usize))
-                .with_colspan(
-                    NonZeroUsize::new(meta.colspan as usize).unwrap_or(NonZeroUsize::MIN),
-                )
-                .with_rowspan(
-                    NonZeroUsize::new(meta.rowspan as usize).unwrap_or(NonZeroUsize::MIN),
-                ),
-        );
-
-        GroupKind::GridCell(cell, None)
+        let info = CellInfo::from_cell_tag_meta(meta);
+        GroupKind::GridCell(info, None)
     };
 
     let span = Span::detached();
@@ -521,7 +498,7 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
             GroupKind::Artifact(ArtifactType::Other)
         } else {
             let tag = tree.groups.tags.push(Tag::TD);
-            GroupKind::TableCell(cell.clone(), tag, None)
+            GroupKind::TableCell(CellInfo::from_table_cell(cell), tag, None)
         };
         push_located(tree, elem, loc, kind)
     } else if let Some(grid) = elem.to_packed::<GridElem>() {
@@ -543,7 +520,7 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
             // for it's semantic structure.
             GroupKind::Artifact(ArtifactType::Other)
         } else {
-            GroupKind::GridCell(cell.clone(), None)
+            GroupKind::GridCell(CellInfo::from_grid_cell(cell), None)
         };
         push_located(tree, elem, loc, kind)
     } else if let Some(heading) = elem.to_packed::<HeadingElem>() {

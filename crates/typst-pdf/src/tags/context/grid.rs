@@ -1,14 +1,12 @@
 use std::num::NonZeroU32;
 
-use az::SaturatingAs;
 use typst_library::foundations::Packed;
 use typst_library::layout::resolve::{CellGrid, GridMeta};
-use typst_library::layout::{GridCell, GridElem};
+use typst_library::layout::GridElem;
 
 use crate::tags::context::GridId;
-use crate::tags::groups::GroupId;
+use crate::tags::groups::{CellInfo, GroupId};
 use crate::tags::tree::Tree;
-use crate::tags::util::PropertyValCopied;
 
 pub(super) trait GridExt {
     /// Convert from "effective" positions inside the cell grid, which may
@@ -56,17 +54,13 @@ impl GridCtx {
         Self { group_id, cells: GridCells::new(width, height) }
     }
 
-    pub fn insert(&mut self, cell: &Packed<GridCell>, id: GroupId) {
-        let x = cell.x.val().unwrap_or_else(|| unreachable!());
-        let y = cell.y.val().unwrap_or_else(|| unreachable!());
-        let rowspan = cell.rowspan.val();
-        let colspan = cell.colspan.val();
+    pub fn insert(&mut self, info: &CellInfo, id: GroupId) {
         self.cells.insert(CtxCell {
             data: (),
-            x: x.saturating_as(),
-            y: y.saturating_as(),
-            rowspan: rowspan.try_into().unwrap_or(NonZeroU32::MAX),
-            colspan: colspan.try_into().unwrap_or(NonZeroU32::MAX),
+            x: info.x,
+            y: info.y,
+            rowspan: NonZeroU32::new(info.rowspan).unwrap_or(NonZeroU32::MIN),
+            colspan: NonZeroU32::new(info.colspan).unwrap_or(NonZeroU32::MIN),
             id,
         });
     }
@@ -95,6 +89,12 @@ impl<T: Clone> GridCells<T> {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Free the entries Vec, keeping the struct valid but empty.
+    pub fn clear(&mut self) {
+        self.entries = Vec::new();
+        self.width = 0;
     }
 
     pub fn width(&self) -> u32 {

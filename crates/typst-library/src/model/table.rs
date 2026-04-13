@@ -335,15 +335,10 @@ impl Synthesize for Packed<TableElem> {
             // For paged output: store compact metadata for PDF tagging.
             let meta = GridMeta::from_cellgrid(&grid);
             self.grid_meta = Some(Arc::new(meta));
-            // For very large tables (>10K entries), also store the grid Arc.
-            // This prevents layout_table from creating a duplicate CellGrid
-            // via cached_table_cellgrid (which may miss due to different
-            // style hash). Saves ~19 MB for 100K-row single-table documents.
-            // Threshold is high to avoid keeping many CellGrids alive in
-            // multi-table documents where each table is small.
-            if grid.entries.len() >= 10_000 {
-                self.grid = Some(grid);
-            }
+            // Don't store the full CellGrid on the element. It keeps ~151 MB
+            // alive via the introspector's Content references during PDF export.
+            // layout_table will find the grid via grid_cache_key in the global
+            // cache, or recompute if evicted.
         } else {
             // For HTML: store full CellGrid (HTML export needs cell bodies).
             self.grid = Some(grid);

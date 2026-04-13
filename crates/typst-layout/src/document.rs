@@ -96,6 +96,24 @@ impl PagedDocument {
         let _ = self.introspector.set(Arc::new(introspector));
     }
 
+    /// Strip heavy Content from the introspector to free memory before
+    /// PDF export. Elements matching `predicate` are replaced with empty
+    /// Content, freeing their subtrees while preserving position data.
+    pub fn strip_introspector_content(
+        &mut self,
+        predicate: impl FnMut(&Content) -> bool,
+    ) {
+        // Ensure introspector is built before stripping.
+        if self.introspector.get().is_none() {
+            let intro = Arc::new(PagedIntrospector::new(&self.pages));
+            let _ = self.introspector.set(intro);
+        }
+        // Get mutable access and strip matching content.
+        if let Some(arc) = self.introspector.get_mut() {
+            Arc::make_mut(arc).strip_content(predicate);
+        }
+    }
+
     /// Sets the disk-backed page store for this document.
     pub fn set_page_store(&mut self, store: DiskPageStore) {
         self.page_store = Some(Arc::new(store));

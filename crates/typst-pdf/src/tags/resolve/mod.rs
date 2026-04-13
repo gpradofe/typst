@@ -36,6 +36,9 @@ struct Resolver<'a> {
     options: &'a PdfOptions<'a>,
     ctx: &'a Ctx,
     flat: &'a FlatTagData,
+    /// Children arrays, split out of FlatTagData so we can take/free them
+    /// incrementally during resolve while borrowing `flat` immutably.
+    children: &'a mut Vec<Vec<TagNode>>,
     tags: &'a mut TagStorage,
     annotations: &'a mut Annotations,
     last_heading_level: Option<NonZeroU16>,
@@ -73,12 +76,15 @@ pub fn resolve(gc: &mut GlobalContext) -> SourceResult<(Option<Locale>, TagTree)
     // and moves TagStorage out. The original Groups struct is now empty.
     let mut flat = gc.tags.tree.groups.flatten();
 
-    let root_children = flat.data.children(GroupId::ROOT.idx());
+    // Split children out of FlatTagData so we can take (consume) them
+    // incrementally during resolve, freeing memory as each group is processed.
+    let mut children = std::mem::take(&mut flat.data.children);
 
     let mut resolver = Resolver {
         options: gc.options,
         ctx: &gc.tags.tree.ctx,
         flat: &flat.data,
+        children: &mut children,
         tags: &mut flat.tag_storage,
         annotations: &mut gc.tags.annotations,
         last_heading_level: None,
@@ -86,23 +92,29 @@ pub fn resolve(gc: &mut GlobalContext) -> SourceResult<(Option<Locale>, TagTree)
         errors: std::mem::take(&mut gc.tags.tree.errors),
     };
 
+    // Take root children so they're freed after processing.
+    let root_children = std::mem::take(&mut resolver.children[GroupId::ROOT.idx()]);
     let mut accum = Accumulator::root();
     accum.reserve(root_children.len());
 
     for child in root_children.iter() {
         resolve_node(&mut resolver, &mut doc_lang, &mut None, &mut accum, child);
     }
+    drop(root_children);
 
     if !resolver.errors.is_empty() {
         return Err(resolver.errors);
     }
 
-    let children = accum.finish();
-
-    // Drop the flat tree to free remaining memory.
+    // Explicitly drop the resolver and its references before building
+    // the final TagTree, to free flat data + children array memory.
+    drop(resolver);
+    drop(children);
     drop(flat);
 
-    Ok((doc_lang, TagTree::from(children)))
+    let result_children = accum.finish();
+
+    Ok((doc_lang, TagTree::from(result_children)))
 }
 
 /// Resolves nodes into an accumulator.
@@ -144,7 +156,14 @@ fn resolve_group_node(
     let mut bbox = rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
     let is_artifact = kind.is_artifact();
     let is_weak = rs.flat.is_weak(idx);
-    let group_children = rs.flat.children(idx);
+    // Take children for single-parent groups to free memory incrementally.
+    // Clone for multi-parent groups (LogicalChild, Artifact, etc.) since they
+    // may be referenced from multiple parents.
+    let group_children = if kind.is_single_parent() {
+        std::mem::take(&mut rs.children[idx])
+    } else {
+        rs.children[idx].clone()
+    };
 
     // If this group doesn't produce a tag, don't create a nested accumulator
     // and push the children directly into the parent.
@@ -273,7 +292,9 @@ fn resolve_artifact_node(
             let idx = id.idx();
             let mut bbox =
                 rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
-            let group_children = rs.flat.children(idx);
+            // Always clone in artifact context — the same group may appear
+            // in a non-artifact parent that still needs its children.
+            let group_children = rs.children[idx].clone();
 
             {
                 let bbox = if bbox.is_some() { &mut bbox } else { &mut parent_bbox };

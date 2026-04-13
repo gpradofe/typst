@@ -126,6 +126,17 @@ impl DiskPageStore {
         self.page_count
     }
 
+    /// Clears Content objects from the tag registry, freeing references
+    /// to the Content tree. This saves ~912 MB for 100K-row table documents.
+    /// Call after the PDF tag tree has been built from the stored pages.
+    /// After this, reconstruct_tag returns CellStart with dummy metadata
+    /// for Tag::Start items (only tag boundaries matter for PDF rendering).
+    pub fn clear_tag_content(&mut self) {
+        self.converter.clear_tags();
+        // Also clear remaining_tags which may hold Tag::Start(Content, ..)
+        self.remaining_tags.clear();
+    }
+
     /// Sets remaining tags to be injected into the last page when read.
     pub fn set_remaining_tags(&mut self, tags: Vec<Tag>) {
         self.remaining_tags = tags;

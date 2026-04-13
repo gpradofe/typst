@@ -219,10 +219,13 @@ fn layout_pages_streaming<'a>(
     let mut total_pages: usize = 0;
 
     let streaming = typst_library::engine_flags::is_streaming_mode();
-    // Use streaming (per-page callback) path only for Phase 2.
-    // During convergence, use the parallel memoized path which handles
-    // locators correctly for introspection convergence.
-    let first_iteration = streaming;
+    // Always use streaming (per-page callback) path: each page frame is
+    // composed, finalized, and flushed to disk before the next is composed.
+    // This avoids accumulating all page frames simultaneously in
+    // layout_flow's `finished: Vec<Frame>`, which dominates peak RAM for
+    // large table documents. Page-run memoization is already disabled
+    // (enabled = false), so the parallel path provides no caching benefit.
+    let first_iteration = true;
 
     // Flush pages to disk when: streaming mode (Phase 2), OR during the
     // first convergence iteration for large documents. In both cases we

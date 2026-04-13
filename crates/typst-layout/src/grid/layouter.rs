@@ -498,7 +498,12 @@ impl<'a> GridLayouter<'a> {
         } else {
             usize::MAX // small grids don't flush
         };
-        let use_disk_store = streaming;
+        // Use disk-backed frame store for large grids even during convergence.
+        // MemoryFrameStore keeps all serialized frames in a Vec<u8>, consuming
+        // ~1.5 GB for 100K-row tables. DiskFrameStore writes to a temp file,
+        // keeping only metadata in RAM.
+        let use_disk_store = streaming
+            || self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
 
         let mut y = 0;
         let mut consecutive_header_count = 0;

@@ -470,18 +470,40 @@ impl FrameConverter {
         }
     }
 
+    /// Clears stored Content objects from tags, freeing references
+    /// to the Content tree. After this, reconstruct_tag returns
+    /// CellStart with dummy metadata instead of Start with Content.
+    /// Only call after the PDF tag tree has been built from the pages.
+    pub fn clear_tags(&mut self) {
+        self.tags = Vec::new();
+    }
+
     pub fn reconstruct_tag(&self, st: STag) -> Tag {
         match st {
             STag::Start(id, loc, flags) => {
-                let content = self.tags[id as usize].clone();
-                Tag::Start(
-                    content,
-                    Location::new(loc),
-                    TagFlags {
-                        introspectable: flags.introspectable,
-                        tagged: flags.tagged,
-                    },
-                )
+                let tag_flags = TagFlags {
+                    introspectable: flags.introspectable,
+                    tagged: flags.tagged,
+                };
+                if (id as usize) < self.tags.len() {
+                    let content = self.tags[id as usize].clone();
+                    Tag::Start(content, Location::new(loc), tag_flags)
+                } else {
+                    // Tags cleared — return CellStart with dummy metadata.
+                    // Only tag boundaries (start/end) and flags matter for
+                    // PDF content rendering; Content is not accessed.
+                    Tag::CellStart(
+                        CellTagMeta {
+                            x: 0,
+                            y: 0,
+                            colspan: 1,
+                            rowspan: 1,
+                            kind: CellTagKind::TableData,
+                        },
+                        Location::new(loc),
+                        tag_flags,
+                    )
+                }
             }
             STag::End(loc, key, flags) => Tag::End(
                 Location::new(loc),

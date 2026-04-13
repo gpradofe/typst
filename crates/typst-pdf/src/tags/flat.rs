@@ -50,12 +50,6 @@ impl FlatTagData {
         self.spans[idx]
     }
 
-    /// Access the children for a group by its raw index.
-    #[inline]
-    pub fn children(&self, idx: usize) -> &[TagNode] {
-        &self.children[idx]
-    }
-
     /// Whether the group at this index is weak.
     #[inline]
     pub fn is_weak(&self, idx: usize) -> bool {
@@ -127,5 +121,19 @@ impl ResolvedGroupKind {
     #[inline]
     pub fn is_link(&self) -> bool {
         matches!(self, Self::Link)
+    }
+
+    /// Whether this group is guaranteed to have exactly one parent,
+    /// making it safe to take (consume) its children during resolve.
+    /// Groups like LogicalChild may appear in multiple parents.
+    #[inline]
+    pub fn is_single_parent(&self) -> bool {
+        !matches!(
+            self,
+            Self::Artifact(_)
+                | Self::LogicalParent
+                | Self::LogicalChild
+                | Self::Transparent
+        )
     }
 }

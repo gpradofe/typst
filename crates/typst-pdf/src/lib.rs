@@ -51,7 +51,7 @@ pub fn pdf(mut document: PagedDocument, options: &PdfOptions) -> SourceResult<Ve
 pub fn pdf_streaming(
     document: &mut PagedDocument,
     options: &PdfOptions,
-    store: &typst_layout::page_store::DiskPageStore,
+    store: &mut typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<Vec<u8>> {
     convert::convert_streaming(document, options, store)
 }

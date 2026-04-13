@@ -2,11 +2,12 @@ use std::collections::hash_map::Entry;
 
 use krilla::tagging::{ArtifactType, Identifier, ListNumbering, TagKind};
 use rustc_hash::FxHashMap;
-use typst_library::foundations::{Content, Packed};
-use typst_library::introspection::Location;
+use typst_library::foundations::{Content, Packed, Smart};
+use typst_library::introspection::{CellTagMeta, Location};
 use typst_library::layout::{GridCell, Inherit};
 use typst_library::math::EquationElem;
 use typst_library::model::{LinkMarker, OutlineEntry, TableCell};
+use typst_library::pdf::TableCellKind;
 use typst_library::text::Locale;
 use typst_library::visualize::ImageElem;
 use typst_syntax::Span;
@@ -175,6 +176,10 @@ impl Groups {
             };
             kinds.push(resolved);
         }
+
+        // Free the drained IdVec capacity (~168 MB for 100K-row tables).
+        // drain() empties the Vec but keeps its allocated capacity.
+        self.list = IdVec::new();
 
         // Clear the locations map to free its memory.
         self.locations = FxHashMap::default();
@@ -498,6 +503,51 @@ impl Group {
     }
 }
 
+/// Lightweight cell metadata for GroupKind, replacing the expensive
+/// `Packed<TableCell>` / `Packed<GridCell>` which each allocate ~1.3 KB
+/// of Content even when using `Content::default()`.
+#[derive(Debug, Clone, Copy)]
+pub struct CellInfo {
+    pub x: u32,
+    pub y: u32,
+    pub colspan: u32,
+    pub rowspan: u32,
+    /// Only meaningful for table cells; `None` for grid cells.
+    pub kind: Option<Smart<TableCellKind>>,
+}
+
+impl CellInfo {
+    pub fn from_table_cell(cell: &Packed<TableCell>) -> Self {
+        Self {
+            x: cell.x.val().unwrap_or(0) as u32,
+            y: cell.y.val().unwrap_or(0) as u32,
+            colspan: cell.colspan.val().get() as u32,
+            rowspan: cell.rowspan.val().get() as u32,
+            kind: Some(cell.kind.val()),
+        }
+    }
+
+    pub fn from_grid_cell(cell: &Packed<GridCell>) -> Self {
+        Self {
+            x: cell.x.val().unwrap_or(0) as u32,
+            y: cell.y.val().unwrap_or(0) as u32,
+            colspan: cell.colspan.val().get() as u32,
+            rowspan: cell.rowspan.val().get() as u32,
+            kind: None,
+        }
+    }
+
+    pub fn from_cell_tag_meta(meta: &CellTagMeta) -> Self {
+        Self {
+            x: meta.x as u32,
+            y: meta.y as u32,
+            colspan: meta.colspan as u32,
+            rowspan: meta.rowspan as u32,
+            kind: if meta.is_table() { Some(meta.to_table_cell_kind()) } else { None },
+        }
+    }
+}
+
 pub enum GroupKind {
     Root(Option<Locale>),
     Artifact(ArtifactType),
@@ -506,9 +556,9 @@ pub enum GroupKind {
     Outline(OutlineId, Option<Locale>),
     OutlineEntry(Packed<OutlineEntry>, Option<Locale>),
     Table(TableId, BBoxId, Option<Locale>),
-    TableCell(Packed<TableCell>, TagId, Option<Locale>),
+    TableCell(CellInfo, TagId, Option<Locale>),
     Grid(GridId, Option<Locale>),
-    GridCell(Packed<GridCell>, Option<Locale>),
+    GridCell(CellInfo, Option<Locale>),
     List(ListId, ListNumbering, Option<Locale>),
     ListItemLabel(Option<Locale>),
     ListItemBody(Option<Locale>),

@@ -3,30 +3,36 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
-use az::SaturatingAs;
 use krilla::tagging as kt;
 use krilla::tagging::{NaiveRgbColor, Tag, TagKind};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use typst_library::foundations::Packed;
+use ecow::EcoString;
+use typst_library::foundations::{Packed, Smart};
 use typst_library::layout::resolve::{GridMeta, Line, LinePosition};
 use typst_library::layout::{Abs, Sides};
-use typst_library::model::{TableCell, TableElem};
+use typst_library::model::TableElem;
 use typst_library::pdf::{TableCellKind, TableHeaderScope};
 use typst_library::visualize::{FixedStroke, Stroke};
 
 use crate::tags::GroupId;
 use crate::tags::context::grid::{CtxCell, GridCells, GridEntry, GridExt};
 use crate::tags::context::{TableId, TagId};
+use crate::tags::groups::CellInfo;
 use crate::tags::tree::Tree;
-use crate::tags::util::{self, PropertyOptRef, PropertyValCopied, TableHeaderScopeExt};
+use crate::tags::util::{self, PropertyOptRef, TableHeaderScopeExt};
 use crate::util::{AbsExt, SidesExt};
 
 #[derive(Debug)]
 pub struct TableCtx {
     pub group_id: GroupId,
     pub table_id: TableId,
-    pub elem: Packed<TableElem>,
+    /// Grid metadata extracted from the table element. Stored separately
+    /// so we can drop the heavy `Packed<TableElem>` reference early,
+    /// freeing the Content tree (~912 MB for 100K-row tables).
+    grid_meta: Arc<GridMeta>,
+    /// Table summary for accessibility, extracted from the table element.
+    summary: Option<EcoString>,
     row_kinds: Vec<TableCellKind>,
     cells: GridCells<TableCellData>,
     border_thickness: Option<f32>,
@@ -56,15 +62,16 @@ pub enum StrokePriority {
 
 impl TableCtx {
     pub fn new(group_id: GroupId, table_id: TableId, table: Packed<TableElem>) -> Self {
-        let grid = table.grid_meta.as_ref().unwrap();
-        let width = grid.non_gutter_column_count();
-        let height = grid.non_gutter_row_count();
+        let grid_meta = table.grid_meta.as_ref().unwrap().clone();
+        let summary = table.summary.opt_ref().cloned();
+        let width = grid_meta.non_gutter_column_count();
+        let height = grid_meta.non_gutter_row_count();
 
         // Generate the default row kinds.
-        let mut grid_headers = grid.headers.iter().peekable();
+        let mut grid_headers = grid_meta.headers.iter().peekable();
         let default_row_kinds = (0..height as u32)
             .map(|y| {
-                let grid_y = grid.to_effective(y);
+                let grid_y = grid_meta.to_effective(y);
 
                 // Find current header
                 while grid_headers.next_if(|h| h.range.end <= grid_y).is_some() {}
@@ -74,7 +81,7 @@ impl TableCtx {
                     return TableCellKind::Header(header.level, TableHeaderScope::Column);
                 }
 
-                if let Some(footer) = &grid.footer
+                if let Some(footer) = &grid_meta.footer
                     && footer.range().contains(&grid_y)
                 {
                     return TableCellKind::Footer;
@@ -84,10 +91,16 @@ impl TableCtx {
             })
             .collect::<Vec<_>>();
 
+        // Drop the heavy Packed<TableElem> — we've extracted what we need.
+        // This releases the reference to the table element Content, which
+        // in turn holds references to all ~100K cell Content objects.
+        drop(table);
+
         Self {
             group_id,
             table_id,
-            elem: table,
+            grid_meta,
+            summary,
             row_kinds: default_row_kinds,
             cells: GridCells::new(width, height),
             border_thickness: None,
@@ -95,14 +108,16 @@ impl TableCtx {
         }
     }
 
-    pub fn insert(&mut self, cell: &Packed<TableCell>, tag: TagId, id: GroupId) {
-        let x = cell.x.val().unwrap_or_else(|| unreachable!()).saturating_as();
-        let y = cell.y.val().unwrap_or_else(|| unreachable!()).saturating_as();
-        let rowspan = cell.rowspan.val();
-        let colspan = cell.colspan.val();
-        let meta = self.elem.grid_meta.as_deref().unwrap();
+    pub fn insert(&mut self, info: &CellInfo, tag: TagId, id: GroupId) {
+        let x: u32 = info.x;
+        let y: u32 = info.y;
+        let rowspan = info.rowspan;
+        let colspan = info.colspan;
+        let meta = &*self.grid_meta;
 
-        let kind = cell.kind.val().unwrap_or(self.row_kinds[y as usize]);
+        let kind = info.kind
+            .and_then(|k| match k { Smart::Custom(k) => Some(k), Smart::Auto => None })
+            .unwrap_or(self.row_kinds[y as usize]);
 
         let [grid_x, grid_y] = [x, y].map(|i| meta.to_effective(i));
         let grid_cell = meta.cell(grid_x, grid_y).unwrap();
@@ -120,18 +135,26 @@ impl TableCtx {
             data: TableCellData { tag, kind, headers: SmallVec::new(), stroke },
             x,
             y,
-            rowspan: rowspan.try_into().unwrap_or(NonZeroU32::MAX),
-            colspan: colspan.try_into().unwrap_or(NonZeroU32::MAX),
+            rowspan: NonZeroU32::new(rowspan).unwrap_or(NonZeroU32::MIN),
+            colspan: NonZeroU32::new(colspan).unwrap_or(NonZeroU32::MIN),
             id,
         });
     }
 
     pub fn build_tag(&self) -> TagKind {
         Tag::Table
-            .with_summary(self.elem.summary.opt_ref().map(Into::into))
+            .with_summary(self.summary.as_ref().map(Into::into))
             .with_border_thickness(self.border_thickness.map(kt::Sides::uniform))
             .with_border_color(self.border_color.map(kt::Sides::uniform))
             .into()
+    }
+
+    /// Free the heavy cells grid after `build_table` has extracted all
+    /// needed data into Groups/TagStorage. Only `build_tag()` is needed
+    /// after this, which uses summary/border fields.
+    pub fn free_cells(&mut self) {
+        self.cells.clear();
+        self.row_kinds = Vec::new();
     }
 }
 
@@ -154,7 +177,7 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
 
     let width = table_ctx.cells.width();
     let height = table_ctx.cells.height();
-    let grid = table_ctx.elem.grid_meta.as_deref().unwrap();
+    let grid = &*table_ctx.grid_meta;
 
     // Only generate row groups such as `THead`, `TFoot`, and `TBody` if
     // there are no rows with mixed cell kinds, and there is at least one
