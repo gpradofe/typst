@@ -9,7 +9,7 @@
     <img alt="RAM Reduction" src="https://img.shields.io/badge/RAM_reduction-up_to_85%25-2E7D32?style=for-the-badge">
   </a>
   <a href="#benchmark-results">
-    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_5.6x-1565C0?style=for-the-badge">
+    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_4.5x-1565C0?style=for-the-badge">
   </a>
   <a href="BENCHMARKS.md">
     <img alt="Benchmarks" src="https://img.shields.io/badge/full_benchmarks-view_report-E65100?style=for-the-badge">
@@ -52,9 +52,9 @@ Tested on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three tabl
 
 | Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
 |----------|-------------|--------------|-----------|--------------|---------------|---------|
-| Simple Table | 16.1 GB | 2.4 GB | **85%** | 41.8s | 16.2s | **2.6x** |
-| Single Table (Advanced) | 15.5 GB | 3.4 GB | **78%** | 44.8s | 21.9s | **2.0x** |
-| Multi-Table (Advanced) | 14.7 GB | 3.7 GB | **75%** | 36.4s | 27.8s | **1.3x** |
+| Simple Table | 16.1 GB | 2.5 GB | **85%** | 41.8s | 17.1s | **2.4x** |
+| Single Table (Advanced) | 15.5 GB | 3.4 GB | **78%** | 44.8s | 21.3s | **2.1x** |
+| Multi-Table (Advanced) | 14.7 GB | 3.7 GB | **75%** | 36.4s | 24.7s | **1.5x** |
 
 ### Memory Scaling
 
@@ -68,16 +68,16 @@ Both binaries were tested at 300K and 600K rows. The original binary requires **
 
 | Rows | Template | Original RAM | Optimized RAM | Reduction | Orig Time | Opt Time | Speedup |
 |------|----------|-------------|--------------|-----------|-----------|----------|---------|
-| 300K | Simple | 45.2 GB | **6.8 GB** | **85%** | 151s | 54s | **2.8x** |
-| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 194s | 69s | **2.8x** |
-| 300K | Multi-Table | 41.9 GB | **10.9 GB** | **74%** | 116s | 116s | 1.0x |
-| 600K | Simple | 90.0 GB | **13.6 GB** | **85%** | 471s | 126s | **3.7x** |
-| 600K | Single Adv. | 89.9 GB | **20.2 GB** | **78%** | 965s | 172s | **5.6x** |
-| 600K | Multi-Table | 81.6 GB | **21.6 GB** | **73%** | 285s | 540s | 0.5x |
+| 300K | Simple | 45.2 GB | **6.8 GB** | **85%** | 151s | 58s | **2.6x** |
+| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 194s | 83s | **2.3x** |
+| 300K | Multi-Table | 41.9 GB | **10.9 GB** | **74%** | 116s | 121s | 1.0x |
+| 600K | Simple | 90.0 GB | **13.7 GB** | **85%** | 471s | 145s | **3.3x** |
+| 600K | Single Adv. | 89.9 GB | **20.2 GB** | **78%** | 965s | 214s | **4.5x** |
+| 600K | Multi-Table | 81.6 GB | **21.7 GB** | **73%** | 285s | 543s | 0.5x |
 
 The optimized binary also scales to **1.2M rows** (producing 3+ GB PDFs at 28-40 GB RAM), well beyond practical limits for the original binary.
 
-> **Note:** Memory reduction percentages (73-85%) remain consistent across all scales. The multi-table template shows a time regression at 600K rows because the optimized binary's periodic cache eviction destroys cross-table cache hits across ~12,000 separate table elements. See [BENCHMARKS.md](BENCHMARKS.md) for full analysis.
+> **Note:** Memory reduction percentages (73-85%) remain consistent across all scales. The multi-table template shows a time regression at 600K rows because the optimized binary's periodic comemo eviction during iteration 1 destroys cross-table cache hits across ~12,000 separate table elements, forcing iteration 2 and streaming to recompute all layouts. See [BENCHMARKS.md](BENCHMARKS.md) for full analysis.
 
 <p align="center">
   <a href="BENCHMARKS.md"><strong>View full benchmark report with all graphs and methodology &rarr;</strong></a>
