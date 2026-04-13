@@ -120,21 +120,32 @@ static TABLE_MULTI_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Budget for memoized layout_multi_impl calls. Calls beyond this count
-/// bypass comemo caching. Tuned so that ~130 tables × ~1.5 calls/table
-/// ≈ 195 calls are cached, keeping comemo at ~99 MB instead of ~166 MB.
-/// The remaining ~88 tables are recomputed in iter 2 (~11ms each ≈ 1s).
+/// bypass comemo caching. Set high (100K) to avoid limiting small/medium
+/// documents. The cumulative grid entries check in `check_table_cache_budget`
+/// provides the actual bound for large documents.
 const TABLE_CACHE_BUDGET: usize = 100_000;
+
+/// Threshold for cumulative grid entries beyond which table caching is
+/// disabled and aggressive eviction (evict(0)) is used between iterations.
+/// At 600K rows (~6M entries), tables should still get cached for iter2+
+/// cache hits. At 1.2M rows (~12M entries), comemo entries from different
+/// iterations accumulate to 10+ GB, so evict(0) is needed.
+/// Set to 8M to exempt 600K while catching 1.2M+.
+pub const TABLE_CACHE_ENTRY_LIMIT: usize = 8_000_000;
 
 /// Increment the table layout counter and return true if still under budget.
 /// Used in layout_multi_impl's `enabled` condition. The counter increments
 /// on every call (including cache hits) so the budget is consistent across
-/// iterations.
+/// iterations. Also checks cumulative grid entries to cap cache size for
+/// large documents.
 pub fn check_table_cache_budget() -> bool {
     let prev = TABLE_MULTI_CALLS.fetch_add(1, Ordering::Relaxed);
     prev < TABLE_CACHE_BUDGET
+        && cumulative_grid_entries() < TABLE_CACHE_ENTRY_LIMIT
 }
 
 /// Reset the table layout counter (between convergence iterations).
 pub fn reset_table_cache_budget() {
     TABLE_MULTI_CALLS.store(0, Ordering::Relaxed);
 }
+

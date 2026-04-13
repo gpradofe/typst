@@ -155,8 +155,9 @@ fn compile_impl<T: Output>(
         } else {
             typst_library::engine_flags::disable_layout_eviction();
         }
-        // Reset cumulative grid entry counter, table-level bypass, and
-        // table cache budget for each iteration.
+        // Reset cumulative grid entry counter and table-level bypass
+        // for each iteration. Table cache budget is reset separately
+        // (may be set to 0 for large documents).
         typst_library::engine_flags::reset_grid_entries();
         typst_library::engine_flags::disable_table_level_bypass();
         typst_library::engine_flags::reset_table_cache_budget();
@@ -259,11 +260,21 @@ fn compile_impl<T: Output>(
         // complete copies of large documents (e.g., 300K pages) in memory.
         document.drop_pages();
 
-        // Evict stale memoization cache entries to free memory from the
-        // previous iteration's cached layout results. Use max_age 2 to
-        // keep entries that might be reused in the next iteration while
-        // freeing older ones.
-        comemo::evict(2);
+        // Evict comemo caches between convergence iterations.
+        // For large documents (>8M cumulative grid entries), evict ALL
+        // cached entries. Each iteration creates separate comemo entries
+        // (different introspector hash) that accumulate, consuming 3+ GB
+        // per iteration. Without aggressive eviction, a 1.2M-row document
+        // accumulates ~40 GB across iterations. evict(0) frees iter N's
+        // entries before iter N+1 starts, keeping peak per-iteration.
+        // For smaller documents, use max_age 2 to preserve cache hits.
+        if typst_library::engine_flags::cumulative_grid_entries()
+            > typst_library::engine_flags::TABLE_CACHE_ENTRY_LIMIT
+        {
+            comemo::evict(0);
+        } else {
+            comemo::evict(2);
+        }
 
         history.push(document);
     }
