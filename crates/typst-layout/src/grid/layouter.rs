@@ -407,8 +407,21 @@ impl<'a> GridLayouter<'a> {
         // Bypass cell-level comemo caching for large grids. This prevents
         // accumulating paragraph cache entries that won't be reused.
         // Also improves speed by avoiding comemo's Content hashing overhead.
+        //
+        // For truly large grids (≥5000 entries, e.g. single 500+ row table),
+        // bypass in all iterations — comemo overhead exceeds cache benefit.
+        // For medium grids (≥100 entries, e.g. multi-table 50-row tables),
+        // only bypass during iteration 1 (eviction enabled). In iteration 2,
+        // memoization enables cross-table cache hits that make the validation
+        // pass fast. Without this distinction, multi-table documents at 600K
+        // rows are 2x slower than the original binary.
         const CELL_BYPASS_THRESHOLD: usize = 100;
-        let bypass_cell_memoize = self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
+        const CELL_BYPASS_ALWAYS_THRESHOLD: usize = 5000;
+        let eviction_enabled = typst_library::engine_flags::is_layout_eviction_enabled();
+        let streaming = typst_library::engine_flags::is_streaming_mode();
+        let entry_count = self.grid.entries.len();
+        let bypass_cell_memoize = entry_count >= CELL_BYPASS_ALWAYS_THRESHOLD
+            || (eviction_enabled && entry_count >= CELL_BYPASS_THRESHOLD);
         if bypass_cell_memoize {
             typst_library::engine_flags::enable_cell_memoize_bypass();
         }
@@ -435,8 +448,6 @@ impl<'a> GridLayouter<'a> {
         }
 
         let mut last_evict_at: usize = 0;
-        let eviction_enabled = typst_library::engine_flags::is_layout_eviction_enabled();
-        let streaming = typst_library::engine_flags::is_streaming_mode();
 
         // Track cumulative grid entries for table cache budget.
         typst_library::engine_flags::add_grid_entries(self.grid.entries.len());
@@ -478,7 +489,11 @@ impl<'a> GridLayouter<'a> {
         // Flush frames for tables with enough entries. During convergence,
         // uses in-memory serialization (no file I/O) to avoid temp file
         // overhead. During streaming, uses disk-backed storage.
-        let frame_flush_threshold: usize = if self.grid.entries.len() >= 100 {
+        // Only flush frames for truly large tables (matching CELL_RELEASE_THRESHOLD).
+        // Small tables (multi-table documents) don't need flushing — their frames
+        // are small and serialization overhead degrades performance significantly
+        // (contributes to 2x slowdown at 600K rows with 12,576 small tables).
+        let frame_flush_threshold: usize = if self.grid.entries.len() >= CELL_RELEASE_THRESHOLD {
             1
         } else {
             usize::MAX // small grids don't flush
