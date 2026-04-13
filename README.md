@@ -9,7 +9,7 @@
     <img alt="RAM Reduction" src="https://img.shields.io/badge/RAM_reduction-up_to_85%25-2E7D32?style=for-the-badge">
   </a>
   <a href="#benchmark-results">
-    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_2.6x-1565C0?style=for-the-badge">
+    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_5.6x-1565C0?style=for-the-badge">
   </a>
   <a href="BENCHMARKS.md">
     <img alt="Benchmarks" src="https://img.shields.io/badge/full_benchmarks-view_report-E65100?style=for-the-badge">
@@ -44,7 +44,7 @@ All optimizations preserve **byte-identical PDF output** — verified by automat
 
 Tested on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, from 100 to 1.2M rows.
 
-### At 100,000 Rows (largest size both binaries handle)
+### At 100,000 Rows
 
 <p align="center">
   <img alt="Summary" src="benchmarks/summary.png" width="800">
@@ -64,17 +64,20 @@ Tested on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three tabl
 
 ### Scaling Beyond 100K Rows
 
-The original binary can technically handle 300K rows but requires ~45 GB of RAM. The optimized binary compiles the same documents in a fraction of the memory:
+Both binaries were tested at 300K and 600K rows. The original binary requires **45-90 GB of RAM** at these scales, while the optimized binary stays under 22 GB:
 
-| Rows | Template | Original RAM | Optimized RAM | Reduction | Optimized Time |
-|------|----------|-------------|--------------|-----------|---------------|
-| 300K | Simple | 45.1 GB | **6.8 GB** | **85%** | 54s |
-| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 69s |
-| 300K | Multi-Table | — | **10.9 GB** | — | 116s |
-| 600K | Simple | — | **13.6 GB** | — | 126s |
-| 600K | Single Adv. | — | **20.2 GB** | — | 172s |
+| Rows | Template | Original RAM | Optimized RAM | Reduction | Orig Time | Opt Time | Speedup |
+|------|----------|-------------|--------------|-----------|-----------|----------|---------|
+| 300K | Simple | 45.2 GB | **6.8 GB** | **85%** | 151s | 54s | **2.8x** |
+| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 194s | 69s | **2.8x** |
+| 300K | Multi-Table | 41.9 GB | **10.9 GB** | **74%** | 116s | 116s | 1.0x |
+| 600K | Simple | 90.0 GB | **13.6 GB** | **85%** | 471s | 126s | **3.7x** |
+| 600K | Single Adv. | 89.9 GB | **20.2 GB** | **78%** | 965s | 172s | **5.6x** |
+| 600K | Multi-Table | 81.6 GB | **21.6 GB** | **73%** | 285s | 540s | 0.5x |
 
-> **Note:** Scaling is approximately linear up to 600K rows. Beyond that, time grows super-linearly (e.g., 1.2M rows takes ~7 min for simple tables, ~11 min for advanced) due to memory pressure effects at 27-40 GB RSS. Multi-table documents scale less efficiently because each department group creates a separate table element.
+The optimized binary also scales to **1.2M rows** (producing 3+ GB PDFs at 28-40 GB RAM), well beyond practical limits for the original binary.
+
+> **Note:** Memory reduction percentages (73-85%) remain consistent across all scales. The multi-table template shows a time regression at 600K rows because the optimized binary's periodic cache eviction destroys cross-table cache hits across ~12,000 separate table elements. See [BENCHMARKS.md](BENCHMARKS.md) for full analysis.
 
 <p align="center">
   <a href="BENCHMARKS.md"><strong>View full benchmark report with all graphs and methodology &rarr;</strong></a>
