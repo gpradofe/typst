@@ -51,7 +51,7 @@ jobs:
     - name: Run Cross
       if: ${{ matrix.cross }}
       env:
-        CROSS_NO_WARNINGS: "0"
+        CROSS_NO_WARNINGS: "1"
       run: |
         cargo install cross --git https://github.com/cross-rs/cross.git --locked --rev 085092ca
         cross build -p typst-cli --release --target ${{ matrix.target }} --features self-update,vendor-openssl
