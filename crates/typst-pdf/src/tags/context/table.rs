@@ -155,6 +155,18 @@ impl TableCtx {
     pub fn free_cells(&mut self) {
         self.cells.clear();
         self.row_kinds = Vec::new();
+        // Drop the Arc<GridMeta> reference — no longer needed after build_table.
+        // For 100K-row tables this frees ~40 MB if this was the last reference.
+        self.grid_meta = Arc::new(GridMeta {
+            entries: Vec::new(),
+            content_cols: 0,
+            content_rows: 0,
+            has_gutter: false,
+            headers: Vec::new(),
+            footer: None,
+            hlines: Vec::new(),
+            vlines: Vec::new(),
+        });
     }
 }
 

@@ -2,6 +2,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 
 use ecow::EcoString;
+use typst_syntax::Span;
 use typst_utils::NonZeroExt;
 
 use crate::diag::{HintedStrResult, HintedString, SourceResult, bail};
@@ -409,6 +410,11 @@ pub enum TableItem {
     HLine(Packed<TableHLine>),
     VLine(Packed<TableVLine>),
     Cell(Packed<TableCell>),
+    /// Auto-generated cell body — content not explicitly wrapped in
+    /// `table.cell(...)`. Stores just the body Content + Span, deferring
+    /// the ~400-byte `Packed<TableCell>` allocation to resolve time where
+    /// only one cell exists at a time. Saves ~288 MB for 1M-cell tables.
+    BodyOnly(Content, Span),
 }
 
 cast! {
@@ -417,6 +423,9 @@ cast! {
         Self::HLine(hline) => hline.into_value(),
         Self::VLine(vline) => vline.into_value(),
         Self::Cell(cell) => cell.into_value(),
+        Self::BodyOnly(body, span) => {
+            Packed::new(TableCell::new(body)).spanned(span).into_value()
+        }
     },
     v: Content => {
         v.try_into()?
@@ -465,7 +474,9 @@ impl TryFrom<Content> for TableItem {
             .or_else(|value| value.into_packed::<TableCell>().map(Self::Cell))
             .unwrap_or_else(|value| {
                 let span = value.span();
-                Self::Cell(Packed::new(TableCell::new(value)).spanned(span))
+                // Store just the body + span, deferring the Packed<TableCell>
+                // allocation to resolve time (one at a time instead of all 1M).
+                Self::BodyOnly(value, span)
             }))
     }
 }
