@@ -378,13 +378,25 @@ fn export_paged(
 fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResult<()> {
     let options = pdf_options(config);
 
+    // Strip TableElem Content from the introspector to free ~400 MB.
+    // The Content tree is kept alive by Tag::Start references in the
+    // introspector. Pages were already flushed to disk (DiskPageStore),
+    // so the introspector is the last holder. PDF export only queries
+    // HeadingElem and AttachElem — never TableElem.
+    document
+        .strip_introspector_content(|c| c.is::<typst::model::TableElem>());
+
     let has_store = document.page_store().is_some();
     let buffer = if has_store {
         // Large document: pages were flushed to disk during layout.
         // Use streaming PDF conversion — reads pages one at a time.
-        let store = document.take_page_store().unwrap();
+        let mut store_arc = document.take_page_store().unwrap();
         comemo::evict(0);
-        typst_pdf::pdf_streaming(&mut document, &options, &store)?
+        // Unwrap Arc for mutable access. Succeeds because take_page_store
+        // removed the document's reference, leaving refcount == 1.
+        let store = std::sync::Arc::get_mut(&mut store_arc)
+            .expect("DiskPageStore should have single owner after take");
+        typst_pdf::pdf_streaming(&mut document, &options, store)?
     } else {
         typst_pdf::pdf(document, &options)?
     };

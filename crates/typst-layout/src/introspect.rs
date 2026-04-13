@@ -61,6 +61,13 @@ impl PagedIntrospector {
     pub fn frame_link_targets(&self) -> &FxHashSet<Location> {
         &self.frame_link_targets
     }
+
+    /// Strip heavy Content from the introspector to free memory before
+    /// PDF export. Elements matching `predicate` are replaced with empty
+    /// Content, freeing their subtrees while preserving position data.
+    pub fn strip_content(&mut self, predicate: impl FnMut(&Content) -> bool) {
+        self.elements.strip_content(predicate);
+    }
 }
 
 impl Introspector for PagedIntrospector {

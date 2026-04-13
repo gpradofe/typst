@@ -101,7 +101,7 @@ pub fn convert(
 pub fn convert_streaming(
     typst_document: &mut PagedDocument,
     options: &PdfOptions,
-    store: &typst_layout::page_store::DiskPageStore,
+    store: &mut typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<Vec<u8>> {
     let settings = SerializeSettings {
         compress_content_streams: true,
@@ -139,6 +139,13 @@ pub fn convert_streaming(
         typst_document.drop_pages();
         tags
     };
+
+    // Free Content objects from the tag registry. The Content tree for
+    // a 100K-row table is ~912 MB — kept alive by the table element's
+    // Content in converter.tags. After init_from_store has extracted all
+    // needed metadata into the Groups tree, Content is never accessed
+    // again. Clearing it frees the entire Content tree.
+    store.clear_tag_content();
 
     let mut gc = GlobalContext::new(
         typst_document,

@@ -208,6 +208,10 @@ pub fn finish(tree: &mut Tree) {
     }
     for table_id in tree.ctx.tables.ids() {
         build_table(tree, table_id);
+        // Free the heavy cells grid (~137 MB for 100K-row tables).
+        // build_table has moved all cell data into Groups/TagStorage.
+        // Only build_tag() is needed later, which uses summary/border fields.
+        tree.ctx.tables.get_mut(table_id).free_cells();
     }
     for grid_id in tree.ctx.grids.ids() {
         build_grid(tree, grid_id);

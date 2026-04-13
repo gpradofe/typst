@@ -291,6 +291,11 @@ fn compile_impl<T: Output>(
     // cache entries from persisting into PDF export.
     comemo::evict(0);
 
+    // Clear the thread-local CellGrid cache. For a 100K-row table,
+    // this holds ~151 MB of Arc<CellGrid> containing Cell.body: Content
+    // references that keep the Content tree alive during PDF export.
+    typst_library::layout::grid::resolve::clear_cellgrid_cache();
+
     // Promote delayed errors.
     let delayed = sink.delayed();
     if !delayed.is_empty() {

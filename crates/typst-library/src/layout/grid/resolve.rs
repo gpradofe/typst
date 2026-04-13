@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustc_hash::FxHashMap;
 
@@ -69,15 +69,14 @@ thread_local! {
     static INSET_CACHE: RefCell<FxHashMap<u128, Arc<Sides<Option<Rel<Length>>>>>> =
         RefCell::new(FxHashMap::default());
 
-    /// Cache for CellGrid by content hash. Since synthesized fields (like grid)
-    /// are excluded from Hash, the content hash is stable across iterations.
-    /// Each table is synthesized 2-4 times per compilation (page-level realize,
-    /// layout_fragment_impl realize, per iteration). Caching avoids recomputing
-    /// the CellGrid each time, saving ~350ms and ~20 MB for 218 tables.
-    /// Limited to MAX_CELLGRID_CACHE entries to cap peak memory at ~3 MB
-    /// instead of ~21 MB for 218-table documents.
-    static CELLGRID_CACHE: RefCell<FxHashMap<u128, Arc<CellGrid>>> =
-        RefCell::new(FxHashMap::default());
+}
+
+/// Global CellGrid cache, shared across all threads. Uses Mutex so
+/// `clear_cellgrid_cache()` can free memory regardless of which thread
+/// populated the cache (rayon worker threads may differ from main thread).
+fn cellgrid_cache() -> &'static Mutex<FxHashMap<u128, Arc<CellGrid>>> {
+    static CACHE: OnceLock<Mutex<FxHashMap<u128, Arc<CellGrid>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Maximum number of CellGrid entries to keep in cache.
@@ -86,8 +85,10 @@ thread_local! {
 const MAX_CELLGRID_CACHE: usize = 30;
 
 /// Clear the CellGrid cache. Call between compilations to prevent stale data.
+/// Unlike the old thread-local version, this clears the single global cache
+/// so entries from rayon worker threads are freed too.
 pub fn clear_cellgrid_cache() {
-    CELLGRID_CACHE.with(|cache| cache.borrow_mut().clear());
+    cellgrid_cache().lock().unwrap().clear();
 }
 
 /// Look up or compute a CellGrid for a table element.
@@ -103,19 +104,19 @@ pub fn cached_table_cellgrid(
     // Also include styles in the hash since they affect cell resolution.
     let style_hash = typst_utils::hash128(&styles);
     let key = hash ^ style_hash;
-    let grid: SourceResult<Arc<CellGrid>> = CELLGRID_CACHE.with(|cache| {
-        if let Some(grid) = cache.borrow().get(&key) {
-            return Ok(grid.clone());
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
+            return Ok((grid.clone(), key));
         }
-        let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
-        let mut cache_mut = cache.borrow_mut();
-        if cache_mut.len() >= MAX_CELLGRID_CACHE {
-            cache_mut.clear();
-        }
-        cache_mut.insert(key, grid.clone());
-        Ok(grid)
-    });
-    Ok((grid?, key))
+    }
+    let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok((grid, key))
 }
 
 /// Look up a CellGrid by a previously stored cache key.
@@ -126,19 +127,20 @@ pub fn cellgrid_by_key(
     engine: &mut Engine,
     styles: StyleChain,
 ) -> SourceResult<Arc<CellGrid>> {
-    CELLGRID_CACHE.with(|cache| {
-        if let Some(grid) = cache.borrow().get(&key) {
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
             return Ok(grid.clone());
         }
-        // Key evicted or never stored — recompute.
-        let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
-        let mut cache_mut = cache.borrow_mut();
-        if cache_mut.len() >= MAX_CELLGRID_CACHE {
-            cache_mut.clear();
-        }
-        cache_mut.insert(key, grid.clone());
-        Ok(grid)
-    })
+    }
+    // Key evicted or never stored — recompute.
+    let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok(grid)
 }
 
 /// Look up or compute a CellGrid for a grid element.
@@ -150,18 +152,19 @@ pub fn cached_grid_cellgrid(
     let hash = typst_utils::hash128(elem.as_ref());
     let style_hash = typst_utils::hash128(&styles);
     let key = hash ^ style_hash;
-    CELLGRID_CACHE.with(|cache| {
-        if let Some(grid) = cache.borrow().get(&key) {
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
             return Ok(grid.clone());
         }
-        let grid = Arc::new(grid_to_cellgrid(elem, engine, styles)?);
-        let mut cache_mut = cache.borrow_mut();
-        if cache_mut.len() >= MAX_CELLGRID_CACHE {
-            cache_mut.clear();
-        }
-        cache_mut.insert(key, grid.clone());
-        Ok(grid)
-    })
+    }
+    let grid = Arc::new(grid_to_cellgrid(elem, engine, styles)?);
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok(grid)
 }
 
 /// Convert a grid to a cell grid.

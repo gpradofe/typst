@@ -446,12 +446,12 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Table(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        &GroupKind::TableCell(ref cell, tag, _) => {
-            let cell = cell.clone();
+        &GroupKind::TableCell(ref info, tag, _) => {
+            let info = *info;
             if let Some(table) = move_into(tree, semantic_parent, id, GroupKind::as_table)
             {
                 let table_ctx = tree.ctx.tables.get_mut(table);
-                table_ctx.insert(&cell, tag, id);
+                table_ctx.insert(&info, tag, id);
             } else {
                 // Avoid panicking, the nesting will be validated later.
                 tree.groups.push_group(direct_parent, id);
@@ -460,11 +460,11 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Grid(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        GroupKind::GridCell(cell, _) => {
-            let cell = cell.clone();
+        GroupKind::GridCell(info, _) => {
+            let info = *info;
             if let Some(grid) = move_into(tree, semantic_parent, id, GroupKind::as_grid) {
                 let grid_ctx = tree.ctx.grids.get_mut(grid);
-                grid_ctx.insert(&cell, id);
+                grid_ctx.insert(&info, id);
             } else {
                 // Avoid panicking, the nesting will be validated later.
                 tree.groups.push_group(direct_parent, id);

@@ -466,6 +466,20 @@ impl<P> ElementIntrospector<P> {
             .cloned()
             .unwrap_or(usize::MAX..usize::MAX)
     }
+
+    /// Replace Content entries matching `predicate` with empty Content,
+    /// freeing heavy subtrees (like TableElem.children with 100K cells).
+    /// Position data and location mappings are preserved.
+    pub fn strip_content(&mut self, mut predicate: impl FnMut(&Content) -> bool) {
+        let empty = Content::default();
+        for (content, _) in &mut self.elems {
+            if predicate(content) {
+                *content = empty.clone();
+            }
+        }
+        // Invalidate query cache since content changed.
+        self.queries = QueryCache::default();
+    }
 }
 
 /// Constructs the [`ElementIntrospector`].
