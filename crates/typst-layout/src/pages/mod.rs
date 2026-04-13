@@ -219,11 +219,9 @@ fn layout_pages_streaming<'a>(
     let mut total_pages: usize = 0;
 
     let streaming = typst_library::engine_flags::is_streaming_mode();
-    // Use streaming path only when streaming mode is active (Phase 2).
-    // During convergence, use the batched path for better performance
-    // (avoids per-page callback overhead, DiskPageStore serialization,
-    // and incremental introspector building). Page flushing handles
-    // memory bounding for large documents via FLUSH_THRESHOLD.
+    // Use streaming (per-page callback) path only for Phase 2.
+    // During convergence, use the parallel memoized path which handles
+    // locators correctly for introspection convergence.
     let first_iteration = streaming;
 
     // Flush pages to disk when: streaming mode (Phase 2), OR during the
@@ -252,13 +250,10 @@ fn layout_pages_streaming<'a>(
                         flushing: &mut bool|
      -> SourceResult<()> {
         // Start flushing mid-stream if threshold exceeded.
-        // Only flush during iter1 (eviction enabled) or streaming mode.
-        // In iter2, keep pages in memory for fast regular PDF export
-        // instead of forcing the slower disk-backed pdf_streaming path.
-        if !*flushing
-            && *total_pages + 1 > FLUSH_THRESHOLD
-            && typst_library::engine_flags::is_layout_eviction_enabled()
-        {
+        // Flush in ALL iterations to bound peak memory. Without this,
+        // iter2+ accumulates all pages in memory (~27GB at 600K rows),
+        // causing heavy swapping on 32GB machines.
+        if !*flushing && *total_pages + 1 > FLUSH_THRESHOLD {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
