@@ -342,6 +342,12 @@ fn table_item_to_resolvable(
             },
         },
         TableItem::Cell(cell) => ResolvableGridItem::Cell(cell.clone()),
+        TableItem::BodyOnly(body, span) => {
+            // Create Packed<TableCell> on-the-fly. The iterator is lazy, so
+            // only ONE cell wrapper exists at a time instead of all 1M.
+            let cell = Packed::new(TableCell::new(body.clone())).spanned(*span);
+            ResolvableGridItem::Cell(cell)
+        }
     }
 }
 

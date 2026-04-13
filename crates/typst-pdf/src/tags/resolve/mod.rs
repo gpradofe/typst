@@ -29,7 +29,8 @@ pub enum TagNode {
     Annotation(AnnotationId),
     /// If the attributes are non-empty this will resolve to a [`Tag::Span`],
     /// otherwise the items are inserted directly.
-    Text(ResolvedTextAttrs, Vec<Identifier>),
+    /// Boxed to keep the TagNode enum small (16 bytes instead of 64).
+    Text(Box<(ResolvedTextAttrs, Vec<Identifier>)>),
 }
 
 struct Resolver<'a> {
@@ -135,8 +136,8 @@ fn resolve_node(
         TagNode::Annotation(id) => {
             accum.push(rs.annotations.take(*id));
         }
-        TagNode::Text(attrs, ids) => {
-            resolve_text(accum, attrs, ids);
+        TagNode::Text(boxed) => {
+            resolve_text(accum, &boxed.0, &boxed.1);
         }
     }
 }

@@ -489,12 +489,12 @@ impl Group {
         }
 
         let last_node = self.nodes.last_mut();
-        if let Some(TagNode::Text(prev_attrs, nodes)) = last_node
-            && *prev_attrs == new_attrs
+        if let Some(TagNode::Text(boxed)) = last_node
+            && boxed.0 == new_attrs
         {
-            nodes.push(text_id);
+            boxed.1.push(text_id);
         } else {
-            self.nodes.push(TagNode::Text(new_attrs, vec![text_id]));
+            self.nodes.push(TagNode::Text(Box::new((new_attrs, vec![text_id]))));
         }
     }
 
