@@ -80,8 +80,8 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/gpradofe/krilla", rev = "e218b73", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/gpradofe/krilla", rev = "e218b73" }
+krilla = { path = "../krilla/crates/krilla", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { path = "../krilla/crates/krilla-svg" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
@@ -161,10 +161,9 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
-debug = 1
 
 [profile.release.package."typst-cli"]
-strip = false
+strip = true
 
 [workspace.lints.clippy]
 blocks_in_conditions = "allow"
