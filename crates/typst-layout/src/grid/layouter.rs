@@ -567,8 +567,8 @@ impl<'a> GridLayouter<'a> {
             // Periodic eviction during grid layout: free all old cell
             // layout caches to bound peak memory. evict(0) frees everything,
             // trading iter2 cache hits for lower peak RSS.
-            // For 10K rows: peak drops ~200 MB, iter2 adds ~2s (still ≤ original).
-            const EVICT_PAGE_INTERVAL: usize = 10;
+            // For 10K rows: peak drops ~200 MB, iter2 adds ~2s (still <= original).
+            const EVICT_PAGE_INTERVAL: usize = 15;
             if (eviction_enabled || bypass_cell_memoize)
                 && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD
                 && self.finished.len() >= last_evict_at + EVICT_PAGE_INTERVAL

@@ -323,6 +323,7 @@ fn layout_pages_streaming<'a>(
                     let flow_loc = run_locator.relayout();
                     let mut flow_split = flow_loc.split();
                     let mut page_idx = 0usize;
+                    let mut last_evict_page: usize = 0;
                     layout_flow_streaming(
                         engine,
                         children,
@@ -350,6 +351,24 @@ fn layout_pages_streaming<'a>(
                                 &mut flushing,
                             )?;
                             page_idx += 1;
+
+                            // Periodic comemo eviction during streaming layout.
+                            // For multi-table documents, small tables never trigger
+                            // grid-level eviction (entries < 5000), but their comemo
+                            // cache entries accumulate unboundedly across pages.
+                            // Evict every 50 pages to bound cache growth while
+                            // preserving enough locality for complex table styling.
+                            // At 50 pages (~10-15 small tables), comemo accumulates
+                            // ~30-50 MB; evicting keeps peak bounded at ~100 MB
+                            // for the cache portion.
+                            const PAGE_EVICT_INTERVAL: usize = 50;
+                            if flushing
+                                && total_pages >= last_evict_page + PAGE_EVICT_INTERVAL
+                            {
+                                comemo::evict(0);
+                                last_evict_page = total_pages;
+                            }
+
                             Ok(())
                         },
                     )?;
