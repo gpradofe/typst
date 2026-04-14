@@ -84,6 +84,10 @@ pub fn convert(
 
     convert_pages(&mut gc, &mut document, pages)?;
 
+    // Free the locations map — only needed during tree building and page
+    // stepping. Saves ~69 MB before build_table peak.
+    tags::clear_locations(&mut gc.tags);
+
     attach_files(&gc, &mut document)?;
     let (doc_lang, tree) = tags::resolve(&mut gc)?;
 
@@ -159,12 +163,15 @@ pub fn convert_streaming(
     // Read pages from disk one at a time. Each page is dropped after conversion.
     convert_pages_from_store(&mut gc, &mut document, store)?;
 
+    // Free the locations map — only needed during tree building and page
+    // stepping (step_end_tag). Saves ~69 MB before build_table peak.
+    tags::clear_locations(&mut gc.tags);
+
     attach_files(&gc, &mut document)?;
 
     // Evict comemo caches accumulated during page conversion. Text shaping
     // and font handling are memoized, but won't be called again — tag
-    // resolution doesn't do text shaping. Freeing these caches (~69 MB)
-    // reduces peak memory during build_table.
+    // resolution doesn't do text shaping.
     comemo::evict(0);
 
     let (doc_lang, tree) = tags::resolve(&mut gc)?;

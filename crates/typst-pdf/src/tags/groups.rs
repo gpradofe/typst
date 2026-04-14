@@ -53,6 +53,13 @@ impl Groups {
         self.locations.get(loc).copied()
     }
 
+    /// Free the locations map. After tree building and page conversion
+    /// (step_end_tag), locations are never accessed again. Freeing early
+    /// avoids ~69 MB alive at peak during build_table.
+    pub fn clear_locations(&mut self) {
+        self.locations = FxHashMap::default();
+    }
+
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn get(&self, id: GroupId) -> &Group {
         self.list.get(id)

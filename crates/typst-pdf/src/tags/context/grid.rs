@@ -165,6 +165,12 @@ impl<T: Clone> GridCells<T> {
         }
     }
 
+    /// Resolve a position to its parent cell, handling Spanned entries.
+    pub fn resolve_at(&self, x: u32, y: u32) -> Option<&CtxCell<T>> {
+        let idx = self.cell_idx(x, y);
+        self.resolve(&self.entries[idx])
+    }
+
     pub fn insert(&mut self, cell: CtxCell<T>) {
         let x = cell.x;
         let y = cell.y;

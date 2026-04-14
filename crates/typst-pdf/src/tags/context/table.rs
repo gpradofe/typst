@@ -44,7 +44,6 @@ pub struct TableCellData {
     tag: TagId,
     kind: TableCellKind,
     headers: SmallVec<[kt::TagId; 1]>,
-    stroke: Sides<PrioritzedStroke>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -113,27 +112,13 @@ impl TableCtx {
         let y: u32 = info.y();
         let rowspan = info.rowspan();
         let colspan = info.colspan();
-        let meta = &*self.grid_meta;
 
         let kind = info.kind()
             .and_then(|k| match k { Smart::Custom(k) => Some(k), Smart::Auto => None })
             .unwrap_or(self.row_kinds[y as usize]);
 
-        let [grid_x, grid_y] = [x, y].map(|i| meta.to_effective(i));
-        let grid_cell = meta.cell(grid_x, grid_y).unwrap();
-        let pattern = meta.stroke_pattern(grid_cell);
-        let stroke = pattern.stroke.clone().zip(pattern.stroke_overridden).map(
-            |(stroke, overridden)| {
-                let priority = if overridden {
-                    StrokePriority::CellStroke
-                } else {
-                    StrokePriority::GridStroke
-                };
-                PrioritzedStroke { stroke, priority }
-            },
-        );
         self.cells.insert(CtxCell {
-            data: TableCellData { tag, kind, headers: SmallVec::new(), stroke },
+            data: TableCellData { tag, kind, headers: SmallVec::new() },
             x,
             y,
             rowspan: NonZeroU32::new(rowspan).unwrap_or(NonZeroU32::MIN),
@@ -275,53 +260,67 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
         }
     }
 
-    // Place h-lines, overwriting the cells stroke.
-    place_explicit_lines(
-        &mut table_ctx.cells,
+    // Build stroke grid from GridMeta. Strokes are NOT stored per-cell in
+    // TableCellData to keep GridEntry small (~64 bytes vs ~128 bytes), saving
+    // ~68 MB for 100K-row tables. The stroke grid is temporary — alive only
+    // during build_table.
+    let mut stroke_grid = StrokeGrid::from_grid(grid, &table_ctx.cells, width, height);
+
+    // Place h-lines, overwriting strokes.
+    // h-lines: block_idx = y (row), inline_idx = x (column)
+    place_explicit_lines_on_grid(
+        &mut stroke_grid,
+        &table_ctx.cells,
         &grid.hlines,
         height,
         width,
-        |cells, (y, x), pos| {
-            let cell = cells.cell_mut(x, y)?;
-            Some(match pos {
-                LinePosition::Before => &mut cell.data.stroke.bottom,
-                LinePosition::After => &mut cell.data.stroke.top,
-            })
+        |block, inline| (inline, block), // (y, x) → (x, y)
+        |stroke, pos| match pos {
+            LinePosition::Before => &mut stroke.bottom,
+            LinePosition::After => &mut stroke.top,
         },
     );
-    // Place v-lines, overwriting the cells stroke.
-    place_explicit_lines(
-        &mut table_ctx.cells,
+    // Place v-lines, overwriting strokes.
+    // v-lines: block_idx = x (column), inline_idx = y (row)
+    place_explicit_lines_on_grid(
+        &mut stroke_grid,
+        &table_ctx.cells,
         &grid.vlines,
         width,
         height,
-        |cells, (x, y), pos| {
-            let cell = cells.cell_mut(x, y)?;
-            Some(match pos {
-                LinePosition::Before => &mut cell.data.stroke.right,
-                LinePosition::After => &mut cell.data.stroke.left,
-            })
+        |block, inline| (block, inline), // (x, y) → (x, y)
+        |stroke, pos| match pos {
+            LinePosition::Before => &mut stroke.right,
+            LinePosition::After => &mut stroke.left,
         },
     );
 
     // Remove overlapping border strokes between cells.
     for y in 0..height {
         for x in 0..width.saturating_sub(1) {
-            prioritize_strokes(&mut table_ctx.cells, (x, y), (x + 1, y), |a, b| {
-                (&mut a.stroke.right, &mut b.stroke.left)
-            });
+            prioritize_grid_strokes(
+                &mut stroke_grid,
+                &table_ctx.cells,
+                (x, y),
+                (x + 1, y),
+                |a, b| (&mut a.right, &mut b.left),
+            );
         }
     }
     for x in 0..width {
         for y in 0..height.saturating_sub(1) {
-            prioritize_strokes(&mut table_ctx.cells, (x, y), (x, y + 1), |a, b| {
-                (&mut a.stroke.bottom, &mut b.stroke.top)
-            });
+            prioritize_grid_strokes(
+                &mut stroke_grid,
+                &table_ctx.cells,
+                (x, y),
+                (x, y + 1),
+                |a, b| (&mut a.bottom, &mut b.top),
+            );
         }
     }
 
     (table_ctx.border_thickness, table_ctx.border_color) =
-        try_resolve_table_stroke(&table_ctx.cells);
+        try_resolve_table_stroke_from_grid(&stroke_grid, &table_ctx.cells);
 
     let mut chunk_kind = table_ctx.row_kinds[0];
     let mut chunk_id = GroupId::INVALID;
@@ -371,12 +370,13 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
                         .into(),
                 };
 
+                let cell_stroke = stroke_grid.get(cell.x, cell.y);
                 resolve_cell_border_and_background(
                     grid,
                     table_ctx.border_thickness,
                     table_ctx.border_color,
                     [cell.x, cell.y],
-                    &cell.data.stroke,
+                    cell_stroke,
                     &mut tag,
                 );
 
@@ -494,18 +494,82 @@ fn table_cell_id(table_id: TableId, x: u32, y: u32) -> kt::TagId {
     kt::TagId::from(buf)
 }
 
-fn place_explicit_lines<F>(
-    cells: &mut GridCells<TableCellData>,
+/// Temporary stroke grid built from GridMeta at the start of build_table.
+/// Keeps strokes out of TableCellData, reducing GridEntry from ~128 to ~64
+/// bytes and saving ~68 MB for 100K-row tables.
+struct StrokeGrid {
+    strokes: Vec<Sides<PrioritzedStroke>>,
+    width: usize,
+}
+
+impl StrokeGrid {
+    /// Build the stroke grid from GridMeta for all cells in the table.
+    fn from_grid(
+        grid: &GridMeta,
+        cells: &GridCells<TableCellData>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let w = width as usize;
+        let default = Sides::splat(PrioritzedStroke {
+            stroke: None,
+            priority: StrokePriority::GridStroke,
+        });
+        let mut strokes = vec![default; w * height as usize];
+
+        for cell in cells.iter().filter_map(GridEntry::as_cell) {
+            let [grid_x, grid_y] = [cell.x, cell.y].map(|i| grid.to_effective(i));
+            if let Some(grid_cell) = grid.cell(grid_x, grid_y) {
+                let pattern = grid.stroke_pattern(grid_cell);
+                let stroke = pattern.stroke.clone().zip(pattern.stroke_overridden).map(
+                    |(stroke, overridden)| {
+                        let priority = if overridden {
+                            StrokePriority::CellStroke
+                        } else {
+                            StrokePriority::GridStroke
+                        };
+                        PrioritzedStroke { stroke, priority }
+                    },
+                );
+                strokes[cell.y as usize * w + cell.x as usize] = stroke;
+            }
+        }
+
+        Self { strokes, width: w }
+    }
+
+    fn get(&self, x: u32, y: u32) -> &Sides<PrioritzedStroke> {
+        &self.strokes[y as usize * self.width + x as usize]
+    }
+
+    fn get_mut(&mut self, x: u32, y: u32) -> &mut Sides<PrioritzedStroke> {
+        &mut self.strokes[y as usize * self.width + x as usize]
+    }
+
+    /// Resolve a position through the cells grid (handling Spanned entries)
+    /// and return the parent cell's stroke.
+    fn resolve_mut<'a>(
+        &'a mut self,
+        cells: &GridCells<TableCellData>,
+        x: u32,
+        y: u32,
+    ) -> Option<&'a mut Sides<PrioritzedStroke>> {
+        let cell = cells.resolve_at(x, y)?;
+        Some(self.get_mut(cell.x, cell.y))
+    }
+}
+
+fn place_explicit_lines_on_grid<F, G>(
+    stroke_grid: &mut StrokeGrid,
+    cells: &GridCells<TableCellData>,
     lines: &[Vec<Line>],
     block_end: u32,
     inline_end: u32,
+    to_xy: G,
     get_side: F,
 ) where
-    F: Fn(
-        &mut GridCells<TableCellData>,
-        (u32, u32),
-        LinePosition,
-    ) -> Option<&mut PrioritzedStroke>,
+    F: Fn(&mut Sides<PrioritzedStroke>, LinePosition) -> &mut PrioritzedStroke,
+    G: Fn(u32, u32) -> (u32, u32),
 {
     for line in lines.iter().flat_map(|lines| lines.iter()) {
         let end = line.end.map(|n| n.get() as u32).unwrap_or(inline_end).min(inline_end);
@@ -527,7 +591,9 @@ fn place_explicit_lines<F>(
             LinePosition::After => line.index as u32,
         };
         for inline_idx in line.start as u32..end {
-            if let Some(side) = get_side(cells, (block_idx, inline_idx), pos) {
+            let (x, y) = to_xy(block_idx, inline_idx);
+            if let Some(cell_stroke) = stroke_grid.resolve_mut(cells, x, y) {
+                let side = get_side(cell_stroke, pos);
                 *side = explicit_stroke();
             }
         }
@@ -538,28 +604,47 @@ fn place_explicit_lines<F>(
 /// that aren't equal. Leave strokes that would overlap but are the same
 /// because then only a single value has to be written for `BorderStyle`,
 /// `BorderThickness`, and `BorderColor` instead of an array for each.
-fn prioritize_strokes<F>(
-    cells: &mut GridCells<TableCellData>,
+fn prioritize_grid_strokes<F>(
+    stroke_grid: &mut StrokeGrid,
+    cells: &GridCells<TableCellData>,
     a: (u32, u32),
     b: (u32, u32),
     get_sides: F,
 ) where
     F: for<'a> Fn(
-        &'a mut TableCellData,
-        &'a mut TableCellData,
+        &'a mut Sides<PrioritzedStroke>,
+        &'a mut Sides<PrioritzedStroke>,
     ) -> (&'a mut PrioritzedStroke, &'a mut PrioritzedStroke),
 {
-    let Some([a, b]) = cells.cells_disjoint_mut([a, b]) else { return };
+    // Resolve both positions to parent cells.
+    let Some(cell_a) = cells.resolve_at(a.0, a.1) else { return };
+    let Some(cell_b) = cells.resolve_at(b.0, b.1) else { return };
 
-    let (a, b) = get_sides(&mut a.data, &mut b.data);
+    let idx_a = cell_a.y as usize * stroke_grid.width + cell_a.x as usize;
+    let idx_b = cell_b.y as usize * stroke_grid.width + cell_b.x as usize;
+
+    if idx_a == idx_b {
+        return; // Same parent cell (spanned), no conflict.
+    }
+
+    // Borrow disjoint entries from the strokes Vec.
+    let (sa, sb) = if idx_a < idx_b {
+        let (left, right) = stroke_grid.strokes.split_at_mut(idx_b);
+        (&mut left[idx_a], &mut right[0])
+    } else {
+        let (left, right) = stroke_grid.strokes.split_at_mut(idx_a);
+        (&mut right[0], &mut left[idx_b])
+    };
+
+    let (a_side, b_side) = get_sides(sa, sb);
 
     // Only remove contesting (different) edge strokes.
-    if a.stroke != b.stroke {
+    if a_side.stroke != b_side.stroke {
         // Prefer the right stroke on same priorities.
-        if a.priority <= b.priority {
-            a.stroke = b.stroke.clone();
+        if a_side.priority <= b_side.priority {
+            a_side.stroke = b_side.stroke.clone();
         } else {
-            b.stroke = a.stroke.clone();
+            b_side.stroke = a_side.stroke.clone();
         }
     }
 }
@@ -567,13 +652,15 @@ fn prioritize_strokes<F>(
 /// Try to resolve a table border stroke color and thickness that is inherited
 /// by the cells. In Acrobat cells cannot override the border thickness or color
 /// of the outer border around the table if the thickness is set.
-fn try_resolve_table_stroke(
+fn try_resolve_table_stroke_from_grid(
+    stroke_grid: &StrokeGrid,
     cells: &GridCells<TableCellData>,
 ) -> (Option<f32>, Option<NaiveRgbColor>) {
     // Omitted strokes are counted too for reasons explained above.
     let mut strokes = FxHashMap::<_, usize>::default();
     for cell in cells.iter().filter_map(GridEntry::as_cell) {
-        for stroke in cell.data.stroke.iter() {
+        let cell_stroke = stroke_grid.get(cell.x, cell.y);
+        for stroke in cell_stroke.iter() {
             *strokes.entry(stroke.stroke.as_ref()).or_default() += 1;
         }
     }
