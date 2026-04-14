@@ -177,6 +177,18 @@ fn layout_document_common(
         styles,
     )?;
 
+    // After realization, eval closure caches (~594 MB for 100K-row tables)
+    // are no longer needed — the cellgrid is stored in a separate cache
+    // and children hold their own Content references. Evict during
+    // iteration 1 to free these caches before layout begins. Only for
+    // large tables (≥100K entries) where the savings are significant.
+    // Small documents skip this to preserve measurement caches.
+    if typst_library::engine_flags::is_layout_eviction_enabled()
+        && typst_library::layout::grid::resolve::has_large_cellgrid(100_000)
+    {
+        comemo::evict(0);
+    }
+
     let (pages, store, introspector) =
         layout_pages_streaming(&mut engine, &mut children, &mut locator, styles)?;
 

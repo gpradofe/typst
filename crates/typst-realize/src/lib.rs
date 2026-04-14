@@ -23,12 +23,12 @@ use typst_library::introspection::{
     Locatable, LocationKey, SplitLocator, Tag, TagElem, TagFlags, Tagged,
 };
 use typst_library::layout::{
-    AlignElem, BoxElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
+    AlignElem, BoxElem, GridElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
 };
 use typst_library::math::{EquationElem, Mathy};
 use typst_library::model::{
     CiteElem, CiteGroup, DocumentElem, EnumElem, ListElem, ListItemLike, ListLike,
-    ParElem, ParbreakElem, TermsElem,
+    ParElem, ParbreakElem, TableElem, TermsElem,
 };
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 use typst_library::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
@@ -556,16 +556,29 @@ fn prepare(
 
     // If the element is locatable, create start and end tags to be able to find
     // the element in the frames after layout. Do this after synthesis and
-    // materialization, so that it includes the synthesized fields. Do it before
-    // marking as prepared so that show-set rules will apply to this element
-    // when queried.
+    // materialization, so that it includes the synthesized fields.
+    //
+    // For table/grid elements with large children Vecs, mark as prepared
+    // BEFORE cloning for the Tag. This avoids a second deep clone (~40 MB
+    // for 100K-row tables) that would otherwise be triggered by
+    // mark_prepared seeing refcount > 1 after elem.clone(). The trade-off
+    // is that the Tag's Content will be prepared, but table/grid elements
+    // are rarely queried and their materialized styles are already baked in.
+    //
+    // For other elements, mark as prepared AFTER cloning so that queried
+    // elements get show-set rules re-applied (see issue-3726-query-show-set).
+    let has_heavy_children = elem.is::<TableElem>() || elem.is::<GridElem>();
+    if has_heavy_children {
+        elem.mark_prepared();
+    }
+
     let tags = elem
         .location()
         .map(|loc| (Tag::Start(elem.clone(), loc, flags), Tag::End(loc, key, flags)));
 
-    // Ensure that this preparation only runs once by marking the element as
-    // prepared.
-    elem.mark_prepared();
+    if !has_heavy_children {
+        elem.mark_prepared();
+    }
 
     Ok(tags)
 }

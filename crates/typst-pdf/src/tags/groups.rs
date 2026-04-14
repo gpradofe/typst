@@ -2,12 +2,13 @@ use std::collections::hash_map::Entry;
 
 use krilla::tagging::{ArtifactType, Identifier, ListNumbering, TagKind};
 use rustc_hash::FxHashMap;
+use thin_vec::ThinVec;
 use typst_library::foundations::{Content, Packed, Smart};
 use typst_library::introspection::{CellTagMeta, Location};
 use typst_library::layout::{GridCell, Inherit};
 use typst_library::math::EquationElem;
 use typst_library::model::{LinkMarker, OutlineEntry, TableCell};
-use typst_library::pdf::TableCellKind;
+use typst_library::pdf::{TableCellKind, TableHeaderScope};
 use typst_library::text::Locale;
 use typst_library::visualize::ImageElem;
 use typst_syntax::Span;
@@ -15,6 +16,11 @@ use typst_syntax::Span;
 use crate::tags::context::{
     AnnotationId, BBoxId, FigureId, GridId, ListId, OutlineId, TableId, TagId,
 };
+
+// Verify sizes: Group=48, GroupKind=24, CellInfo=12
+const _: () = assert!(std::mem::size_of::<Group>() <= 56);
+const _: () = assert!(std::mem::size_of::<GroupKind>() <= 32);
+const _: () = assert!(std::mem::size_of::<CellInfo>() <= 16);
 use crate::tags::flat::{FlatTagData, FlatTagTree, ResolvedGroupKind};
 use crate::tags::resolve::TagNode;
 use crate::tags::tree::{ResolvedTextAttrs, TextAttr};
@@ -143,7 +149,7 @@ impl Groups {
                 GroupKind::LogicalParent(_) => ResolvedGroupKind::LogicalParent,
                 GroupKind::LogicalChild(_, _) => ResolvedGroupKind::LogicalChild,
                 GroupKind::Outline(_, _) => ResolvedGroupKind::Outline,
-                GroupKind::OutlineEntry(_, _) => ResolvedGroupKind::OutlineEntry,
+                GroupKind::OutlineEntry(_) => ResolvedGroupKind::OutlineEntry,
                 GroupKind::Table(id, _, _) => ResolvedGroupKind::Table(id),
                 GroupKind::TableCell(_, tag_id, _) => {
                     ResolvedGroupKind::TableCell(tag_id)
@@ -159,14 +165,14 @@ impl Groups {
                 GroupKind::FigureWrapper(id) => ResolvedGroupKind::FigureWrapper(id),
                 GroupKind::Figure(id, _, _) => ResolvedGroupKind::Figure(id),
                 GroupKind::FigureCaption(_, _) => ResolvedGroupKind::FigureCaption,
-                GroupKind::Image(ref image, _, _) => {
-                    ResolvedGroupKind::Image { alt: image.alt.opt_ref().cloned() }
+                GroupKind::Image(b) => {
+                    ResolvedGroupKind::Image { alt: b.0.alt.opt_ref().cloned() }
                 }
-                GroupKind::Formula(ref equation, _, _) => ResolvedGroupKind::Formula {
-                    alt: equation.alt.opt_ref().cloned(),
-                    block: equation.block.val(),
+                GroupKind::Formula(b) => ResolvedGroupKind::Formula {
+                    alt: b.0.alt.opt_ref().cloned(),
+                    block: b.0.block.val(),
                 },
-                GroupKind::Link(_, _) => ResolvedGroupKind::Link,
+                GroupKind::Link(_) => ResolvedGroupKind::Link,
                 GroupKind::CodeBlock(_) => ResolvedGroupKind::CodeBlock,
                 GroupKind::CodeBlockLine(_) => ResolvedGroupKind::CodeBlockLine,
                 GroupKind::Par(_) => ResolvedGroupKind::Par,
@@ -275,7 +281,7 @@ impl Groups {
 
         let new_kind = match &group.kind {
             GroupKind::Artifact(ty) => GroupKind::Artifact(*ty),
-            GroupKind::Link(elem, _) => GroupKind::Link(elem.clone(), None),
+            GroupKind::Link(b) => GroupKind::Link(Box::new((b.0.clone(), None))),
             GroupKind::Par(_) => GroupKind::Par(None),
             GroupKind::TextAttr(attr) => GroupKind::TextAttr(attr.clone()),
             GroupKind::Standard(old, _) => {
@@ -410,7 +416,11 @@ impl Groups {
 }
 
 #[derive(Debug, Default)]
-pub struct TagStorage(Vec<Option<TagKind>>);
+/// Stores TagKind values by index. Uses Box<TagKind> to keep each entry
+/// small (8 bytes per slot vs ~122 bytes inline). When tags are taken
+/// during resolve, the Box is dropped immediately, freeing memory
+/// incrementally instead of holding the full vec alive.
+pub struct TagStorage(Vec<Option<Box<TagKind>>>);
 
 impl TagStorage {
     pub const fn new() -> Self {
@@ -419,20 +429,20 @@ impl TagStorage {
 
     pub fn push(&mut self, tag: impl Into<TagKind>) -> TagId {
         let id = TagId::new(self.0.len() as u32);
-        self.0.push(Some(tag.into()));
+        self.0.push(Some(Box::new(tag.into())));
         id
     }
 
     pub fn set(&mut self, id: TagId, tag: impl Into<TagKind>) {
-        self.0[id.idx()] = Some(tag.into());
+        self.0[id.idx()] = Some(Box::new(tag.into()));
     }
 
     pub fn get(&self, id: TagId) -> &TagKind {
-        self.0[id.idx()].as_ref().expect("tag")
+        self.0[id.idx()].as_deref().expect("tag")
     }
 
     pub fn take(&mut self, id: TagId) -> TagKind {
-        self.0[id.idx()].take().expect("tag")
+        *self.0[id.idx()].take().expect("tag")
     }
 }
 
@@ -454,8 +464,9 @@ pub struct Group {
     pub span: Span,
     pub kind: GroupKind,
     /// Only allow mutating this list through the API, to ensure the parent
-    /// will be set for child groups.
-    nodes: Vec<TagNode>,
+    /// will be set for child groups. Uses ThinVec (8 bytes vs Vec's 24)
+    /// to reduce Group from 80 to 64 bytes — saving ~34 MB for 1M groups.
+    nodes: ThinVec<TagNode>,
     /// Whether this group was split off another group as a result of
     /// overlapping tags. A weak group will be omitted if it has no children.
     pub weak: bool,
@@ -463,11 +474,11 @@ pub struct Group {
 
 impl Group {
     fn new(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: Vec::new(), weak: false }
+        Group { parent, span, kind, nodes: ThinVec::new(), weak: false }
     }
 
     fn weak(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: Vec::new(), weak: true }
+        Group { parent, span, kind, nodes: ThinVec::new(), weak: true }
     }
 
     pub fn nodes(&self) -> &[TagNode] {
@@ -503,58 +514,118 @@ impl Group {
     }
 }
 
-/// Lightweight cell metadata for GroupKind, replacing the expensive
-/// `Packed<TableCell>` / `Packed<GridCell>` which each allocate ~1.3 KB
-/// of Content even when using `Content::default()`.
+/// Compact cell metadata for GroupKind (12 bytes vs the original 24).
+/// Replaces the expensive `Packed<TableCell>` / `Packed<GridCell>` and uses
+/// smaller field types. x/colspan/rowspan use u16 (max 65535 — more than
+/// enough for any realistic table). y stays u32 for large tables (100K+ rows).
+/// The cell kind is packed into a u16 to avoid the overhead of
+/// `Option<Smart<TableCellKind>>` (8 bytes → 2 bytes).
 #[derive(Debug, Clone, Copy)]
 pub struct CellInfo {
-    pub x: u32,
-    pub y: u32,
-    pub colspan: u32,
-    pub rowspan: u32,
-    /// Only meaningful for table cells; `None` for grid cells.
-    pub kind: Option<Smart<TableCellKind>>,
+    x: u16,
+    colspan: u16,
+    rowspan: u16,
+    /// Packed kind encoding:
+    /// 0 = None (grid cell), 1 = Smart::Auto, 2 = Data, 3 = Footer,
+    /// 4+ = Header: bits [15:2] = level-1, bits [1:0] = scope (0=Both,1=Column,2=Row)
+    kind_packed: u16,
+    y: u32,
 }
 
 impl CellInfo {
+    pub fn x(&self) -> u32 { self.x as u32 }
+    pub fn y(&self) -> u32 { self.y }
+    pub fn colspan(&self) -> u32 { self.colspan as u32 }
+    pub fn rowspan(&self) -> u32 { self.rowspan as u32 }
+
+    pub fn kind(&self) -> Option<Smart<TableCellKind>> {
+        match self.kind_packed {
+            0 => None,
+            1 => Some(Smart::Auto),
+            2 => Some(Smart::Custom(TableCellKind::Data)),
+            3 => Some(Smart::Custom(TableCellKind::Footer)),
+            v => {
+                let v = v - 4;
+                let scope = match v & 0x3 {
+                    0 => TableHeaderScope::Both,
+                    1 => TableHeaderScope::Column,
+                    _ => TableHeaderScope::Row,
+                };
+                let level = (v >> 2) as u32 + 1;
+                Some(Smart::Custom(TableCellKind::Header(
+                    std::num::NonZeroU32::new(level).unwrap(),
+                    scope,
+                )))
+            }
+        }
+    }
+
+    fn encode_kind(kind: Option<Smart<TableCellKind>>) -> u16 {
+        match kind {
+            None => 0,
+            Some(Smart::Auto) => 1,
+            Some(Smart::Custom(TableCellKind::Data)) => 2,
+            Some(Smart::Custom(TableCellKind::Footer)) => 3,
+            Some(Smart::Custom(TableCellKind::Header(level, scope))) => {
+                let scope_bits: u16 = match scope {
+                    TableHeaderScope::Both => 0,
+                    TableHeaderScope::Column => 1,
+                    TableHeaderScope::Row => 2,
+                };
+                4 + (((level.get() as u16).saturating_sub(1)) << 2) | scope_bits
+            }
+        }
+    }
+
     pub fn from_table_cell(cell: &Packed<TableCell>) -> Self {
         Self {
-            x: cell.x.val().unwrap_or(0) as u32,
+            x: cell.x.val().unwrap_or(0) as u16,
             y: cell.y.val().unwrap_or(0) as u32,
-            colspan: cell.colspan.val().get() as u32,
-            rowspan: cell.rowspan.val().get() as u32,
-            kind: Some(cell.kind.val()),
+            colspan: cell.colspan.val().get() as u16,
+            rowspan: cell.rowspan.val().get() as u16,
+            kind_packed: Self::encode_kind(Some(cell.kind.val())),
         }
     }
 
     pub fn from_grid_cell(cell: &Packed<GridCell>) -> Self {
         Self {
-            x: cell.x.val().unwrap_or(0) as u32,
+            x: cell.x.val().unwrap_or(0) as u16,
             y: cell.y.val().unwrap_or(0) as u32,
-            colspan: cell.colspan.val().get() as u32,
-            rowspan: cell.rowspan.val().get() as u32,
-            kind: None,
+            colspan: cell.colspan.val().get() as u16,
+            rowspan: cell.rowspan.val().get() as u16,
+            kind_packed: 0, // None for grid cells
         }
     }
 
     pub fn from_cell_tag_meta(meta: &CellTagMeta) -> Self {
+        let kind = if meta.is_table() {
+            Some(meta.to_table_cell_kind())
+        } else {
+            None
+        };
         Self {
-            x: meta.x as u32,
+            x: meta.x as u16,
             y: meta.y as u32,
-            colspan: meta.colspan as u32,
-            rowspan: meta.rowspan as u32,
-            kind: if meta.is_table() { Some(meta.to_table_cell_kind()) } else { None },
+            colspan: meta.colspan as u16,
+            rowspan: meta.rowspan as u16,
+            kind_packed: Self::encode_kind(kind),
         }
     }
 }
 
+/// Tag group kind enum. Rare variants containing `Packed<T>` or `Content`
+/// (24 bytes each) are boxed to keep the common-path enum small (24 bytes
+/// vs 40 bytes without boxing). This saves ~16 bytes per Group × ~1M groups
+/// = ~32 MB for large table documents.
 pub enum GroupKind {
     Root(Option<Locale>),
     Artifact(ArtifactType),
-    LogicalParent(Content),
+    /// Boxed: Content is 24 bytes, rare variant.
+    LogicalParent(Box<Content>),
     LogicalChild(Inherit, GroupId),
     Outline(OutlineId, Option<Locale>),
-    OutlineEntry(Packed<OutlineEntry>, Option<Locale>),
+    /// Boxed: Packed<OutlineEntry> is 24 bytes, rare variant.
+    OutlineEntry(Box<(Packed<OutlineEntry>, Option<Locale>)>),
     Table(TableId, BBoxId, Option<Locale>),
     TableCell(CellInfo, TagId, Option<Locale>),
     Grid(GridId, Option<Locale>),
@@ -573,9 +644,12 @@ pub enum GroupKind {
     /// the bbox of the parent figure group kind. The caption might be moved
     /// into table, or next to the figure tag.
     FigureCaption(BBoxId, Option<Locale>),
-    Image(Packed<ImageElem>, BBoxId, Option<Locale>),
-    Formula(Packed<EquationElem>, BBoxId, Option<Locale>),
-    Link(Packed<LinkMarker>, Option<Locale>),
+    /// Boxed: Packed<ImageElem> is 24 bytes, rare variant.
+    Image(Box<(Packed<ImageElem>, BBoxId, Option<Locale>)>),
+    /// Boxed: Packed<EquationElem> is 24 bytes, rare variant.
+    Formula(Box<(Packed<EquationElem>, BBoxId, Option<Locale>)>),
+    /// Boxed: Packed<LinkMarker> is 24 bytes, rare variant.
+    Link(Box<(Packed<LinkMarker>, Option<Locale>)>),
     CodeBlock(Option<Locale>),
     CodeBlockLine(Option<Locale>),
     /// Whether this paragraph is a `weak` pragraph that is omitted when it
@@ -640,7 +714,7 @@ impl GroupKind {
     }
 
     pub fn as_link(&self) -> Option<&Packed<LinkMarker>> {
-        if let Self::Link(v, ..) = self { Some(v) } else { None }
+        if let Self::Link(b) = self { Some(&b.0) } else { None }
     }
 
     pub fn as_table(&self) -> Option<TableId> {
@@ -660,42 +734,42 @@ impl GroupKind {
             GroupKind::Table(_, id, _) => Some(*id),
             GroupKind::Figure(_, id, _) => Some(*id),
             GroupKind::FigureCaption(id, _) => Some(*id),
-            GroupKind::Image(_, id, _) => Some(*id),
-            GroupKind::Formula(_, id, _) => Some(*id),
+            GroupKind::Image(b) => Some(b.1),
+            GroupKind::Formula(b) => Some(b.1),
             _ => None,
         }
     }
 
     pub fn lang(&self) -> Option<Option<Locale>> {
-        Some(match *self {
-            GroupKind::Root(lang) => lang,
+        Some(match self {
+            GroupKind::Root(lang) => *lang,
             GroupKind::Artifact(_) => return None,
             GroupKind::LogicalParent(_) => return None,
             GroupKind::LogicalChild(_, _) => return None,
-            GroupKind::Outline(_, lang) => lang,
-            GroupKind::OutlineEntry(_, lang) => lang,
-            GroupKind::Table(_, _, lang) => lang,
-            GroupKind::TableCell(_, _, lang) => lang,
-            GroupKind::Grid(_, lang) => lang,
-            GroupKind::GridCell(_, lang) => lang,
-            GroupKind::List(_, _, lang) => lang,
-            GroupKind::ListItemLabel(lang) => lang,
-            GroupKind::ListItemBody(lang) => lang,
-            GroupKind::TermsItemLabel(lang) => lang,
-            GroupKind::TermsItemBody(_, lang) => lang,
-            GroupKind::BibEntry(lang) => lang,
+            GroupKind::Outline(_, lang) => *lang,
+            GroupKind::OutlineEntry(b) => b.1,
+            GroupKind::Table(_, _, lang) => *lang,
+            GroupKind::TableCell(_, _, lang) => *lang,
+            GroupKind::Grid(_, lang) => *lang,
+            GroupKind::GridCell(_, lang) => *lang,
+            GroupKind::List(_, _, lang) => *lang,
+            GroupKind::ListItemLabel(lang) => *lang,
+            GroupKind::ListItemBody(lang) => *lang,
+            GroupKind::TermsItemLabel(lang) => *lang,
+            GroupKind::TermsItemBody(_, lang) => *lang,
+            GroupKind::BibEntry(lang) => *lang,
             GroupKind::FigureWrapper(_) => return None,
-            GroupKind::Figure(_, _, lang) => lang,
-            GroupKind::FigureCaption(_, lang) => lang,
-            GroupKind::Image(_, _, lang) => lang,
-            GroupKind::Formula(_, _, lang) => lang,
-            GroupKind::Link(_, lang) => lang,
-            GroupKind::CodeBlock(lang) => lang,
-            GroupKind::CodeBlockLine(lang) => lang,
-            GroupKind::Par(lang) => lang,
+            GroupKind::Figure(_, _, lang) => *lang,
+            GroupKind::FigureCaption(_, lang) => *lang,
+            GroupKind::Image(b) => b.2,
+            GroupKind::Formula(b) => b.2,
+            GroupKind::Link(b) => b.1,
+            GroupKind::CodeBlock(lang) => *lang,
+            GroupKind::CodeBlockLine(lang) => *lang,
+            GroupKind::Par(lang) => *lang,
             GroupKind::TextAttr(_) => return None,
             GroupKind::Transparent => return None,
-            GroupKind::Standard(_, lang) => lang,
+            GroupKind::Standard(_, lang) => *lang,
         })
     }
 
@@ -706,7 +780,7 @@ impl GroupKind {
             GroupKind::LogicalParent(_) => return None,
             GroupKind::LogicalChild(_, _) => return None,
             GroupKind::Outline(_, lang) => lang,
-            GroupKind::OutlineEntry(_, lang) => lang,
+            GroupKind::OutlineEntry(b) => &mut b.1,
             GroupKind::Table(_, _, lang) => lang,
             GroupKind::TableCell(_, _, lang) => lang,
             GroupKind::Grid(_, lang) => lang,
@@ -720,9 +794,9 @@ impl GroupKind {
             GroupKind::FigureWrapper(_) => return None,
             GroupKind::Figure(_, _, lang) => lang,
             GroupKind::FigureCaption(_, lang) => lang,
-            GroupKind::Image(_, _, lang) => lang,
-            GroupKind::Formula(_, _, lang) => lang,
-            GroupKind::Link(_, lang) => lang,
+            GroupKind::Image(b) => &mut b.2,
+            GroupKind::Formula(b) => &mut b.2,
+            GroupKind::Link(b) => &mut b.1,
             GroupKind::CodeBlock(lang) => lang,
             GroupKind::CodeBlockLine(lang) => lang,
             GroupKind::Par(lang) => lang,

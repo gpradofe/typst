@@ -91,6 +91,13 @@ pub fn clear_cellgrid_cache() {
     cellgrid_cache().lock().unwrap().clear();
 }
 
+/// Returns true if any cached cellgrid has at least `threshold` entries.
+/// Used to decide whether to evict comemo caches after realization.
+pub fn has_large_cellgrid(threshold: usize) -> bool {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.values().any(|grid| grid.entries.len() >= threshold)
+}
+
 /// Look up or compute a CellGrid for a table element.
 /// Returns (grid, cache_key) so the key can be stored on the element
 /// for later lookup in layout_table (where materialize has changed the
@@ -1215,30 +1222,39 @@ impl CellGrid {
 }
 
 /// Compact cell metadata for PDF tagging. Contains only stroke/fill data,
-/// not the full Content body. ~40 bytes vs ~300+ bytes per cell.
-#[derive(Debug, Clone, PartialEq, Hash)]
+/// not the full Content body.
+///
+/// Stroke data is deduplicated: each cell stores a u16 index into
+/// `GridMeta::unique_strokes` instead of the full `Sides<Option<Arc<...>>>`
+/// (32+ bytes → 2 bytes). For 100K-row tables with uniform strokes, this
+/// reduces the entries Vec from ~83 MB to ~14 MB.
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
 pub struct MetaCell {
+    /// Index into `GridMeta::unique_strokes` for this cell's stroke pattern.
+    pub stroke_idx: u16,
+    /// The cell's fill color as pre-converted RGB bytes [r, g, b].
+    /// Only solid colors are stored; gradients and tilings are None.
+    pub fill_rgb: Option<[u8; 3]>,
+}
+
+/// A deduplicated stroke pattern with its overridden flags.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct StrokePattern {
     /// The cell's stroke sides.
     pub stroke: Sides<Option<Arc<Stroke<Abs>>>>,
     /// Which stroke sides were explicitly overridden by the cell.
     pub stroke_overridden: Sides<bool>,
-    /// The cell's fill color as pre-converted RGB bytes [r, g, b].
-    /// Only solid colors are stored; gradients and tilings are None
-    /// (PDF table cell attributes only support solid background colors).
-    /// Using [u8; 3] instead of Paint reduces MetaCell from 64 to 40 bytes,
-    /// saving ~9.6 MB for 400K cell entries in multi-table documents.
-    pub fill_rgb: Option<[u8; 3]>,
 }
 
 /// Entry in GridMeta, mirroring CellGrid's Entry but with MetaCell.
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
 pub enum MetaEntry {
     /// An entry holding compact cell data.
     Cell(MetaCell),
     /// An entry merged with another cell.
     Merged {
-        /// The index of the parent cell.
-        parent: usize,
+        /// The index of the parent cell (u32 saves 4 bytes vs usize on 64-bit).
+        parent: u32,
     },
 }
 
@@ -1253,13 +1269,19 @@ impl MetaEntry {
 }
 
 /// Compact grid metadata for PDF tagging. Stores only stroke/fill data
-/// per cell plus structural info (headers, footer, lines). ~9-11 MB for
-/// 218 tables vs ~42 MB for full CellGrid with Content bodies.
+/// per cell plus structural info (headers, footer, lines).
+///
+/// Stroke data is deduplicated via `unique_strokes`. For 100K-row tables
+/// with uniform strokes, there are typically only 1-3 unique stroke
+/// patterns shared across 1M+ cells.
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub struct GridMeta {
     /// Per-cell metadata, indexed by content coordinates (no gutter).
     /// Same indexing as CellGrid::entries.
     pub entries: Vec<MetaEntry>,
+    /// Deduplicated stroke patterns. Each MetaCell stores an index into
+    /// this table. Typically very small (1-10 entries) even for huge tables.
+    pub unique_strokes: Vec<StrokePattern>,
     /// Number of non-gutter (content) columns. Used for entry indexing.
     pub content_cols: usize,
     /// Number of non-gutter (content) rows.
@@ -1278,32 +1300,58 @@ pub struct GridMeta {
 
 impl GridMeta {
     /// Extract compact metadata from a full CellGrid, discarding cell bodies.
+    /// Deduplicates stroke patterns into `unique_strokes` table.
     pub fn from_cellgrid(grid: &CellGrid) -> Self {
+        // Build deduplicated stroke table.
+        let mut unique_strokes: Vec<StrokePattern> = Vec::new();
+        // Map from stroke pattern hash to index, for fast lookup.
+        let mut stroke_map: FxHashMap<u64, u16> = FxHashMap::default();
+
         let entries = grid
             .entries
             .iter()
             .map(|e| match e {
-                Entry::Cell(cell) => MetaEntry::Cell(MetaCell {
-                    stroke: cell.stroke.clone(),
-                    stroke_overridden: cell.stroke_overridden,
-                    fill_rgb: cell.fill.as_ref().and_then(|paint| match paint {
-                        Paint::Solid(color) => {
-                            let c = color.to_rgb();
-                            Some([
-                                (255.0 * c.red).round() as u8,
-                                (255.0 * c.green).round() as u8,
-                                (255.0 * c.blue).round() as u8,
-                            ])
-                        }
-                        _ => None,
-                    }),
-                }),
-                Entry::Merged { parent } => MetaEntry::Merged { parent: *parent },
+                Entry::Cell(cell) => {
+                    // Find or insert the stroke pattern.
+                    let stroke_key = typst_utils::hash128(&(
+                        &cell.stroke,
+                        &cell.stroke_overridden,
+                    )) as u64;
+                    let stroke_idx = *stroke_map
+                        .entry(stroke_key)
+                        .or_insert_with(|| {
+                            let idx = unique_strokes.len() as u16;
+                            unique_strokes.push(StrokePattern {
+                                stroke: cell.stroke.clone(),
+                                stroke_overridden: cell.stroke_overridden,
+                            });
+                            idx
+                        });
+
+                    MetaEntry::Cell(MetaCell {
+                        stroke_idx,
+                        fill_rgb: cell.fill.as_ref().and_then(|paint| match paint {
+                            Paint::Solid(color) => {
+                                let c = color.to_rgb();
+                                Some([
+                                    (255.0 * c.red).round() as u8,
+                                    (255.0 * c.green).round() as u8,
+                                    (255.0 * c.blue).round() as u8,
+                                ])
+                            }
+                            _ => None,
+                        }),
+                    })
+                }
+                Entry::Merged { parent } => {
+                    MetaEntry::Merged { parent: *parent as u32 }
+                }
             })
             .collect();
 
         Self {
             entries,
+            unique_strokes,
             content_cols: grid.non_gutter_column_count(),
             content_rows: grid.non_gutter_row_count(),
             has_gutter: grid.has_gutter,
@@ -1345,6 +1393,12 @@ impl GridMeta {
     /// Returns None for gutter, merged, or out-of-bounds entries.
     pub fn cell(&self, x: usize, y: usize) -> Option<&MetaCell> {
         self.entry(x, y).and_then(MetaEntry::as_cell)
+    }
+
+    /// Look up the stroke pattern for a meta cell.
+    #[inline]
+    pub fn stroke_pattern(&self, cell: &MetaCell) -> &StrokePattern {
+        &self.unique_strokes[cell.stroke_idx as usize]
     }
 }
 
@@ -1527,6 +1581,12 @@ impl CellGridResolver<'_, '_> {
             bail!(self.span, "too many cells or lines were given")
         };
 
+        // Add extra capacity for colspan cells that create Merged entries
+        // beyond child_count. Without this margin, the Vec doubles when it
+        // overflows (e.g. 1M → 2M entries = 144 MB wasted). A 5% margin
+        // covers typical header/footer rows with colspan.
+        let capacity = child_count + child_count / 20 + columns * 20;
+
         // Rows in this bitset are occupied by an existing header.
         // This allows for efficiently checking whether a cell would collide
         // with a header at a certain row. (For footers, it's easy as there is
@@ -1535,7 +1595,16 @@ impl CellGridResolver<'_, '_> {
         // TODO(subfooters): how to add a footer here while avoiding
         // unnecessary allocations?
         let mut header_rows: SmallBitSet = SmallBitSet::new();
-        let mut resolved_cells: Vec<Option<Entry>> = Vec::with_capacity(child_count);
+        let mut resolved_cells: Vec<Option<Entry>> = Vec::with_capacity(capacity);
+
+        // For large grids, periodically evict comemo caches during cell
+        // resolution. The fill/stroke/align/inset closure evaluations are
+        // memoized but each cell has unique arguments, so no cache hits
+        // occur. Without eviction, these caches accumulate to ~594 MB for
+        // 100K-row tables. Evict every 100K children to keep peak bounded.
+        let evict_during_resolve = child_count >= 100_000;
+        let mut children_processed: usize = 0;
+
         for child in children {
             self.resolve_grid_child(
                 columns,
@@ -1550,6 +1619,17 @@ impl CellGridResolver<'_, '_> {
                 &mut at_least_one_cell,
                 child,
             )?;
+
+            if evict_during_resolve {
+                children_processed += 1;
+                if children_processed % 100_000 == 0 {
+                    comemo::evict(0);
+                }
+            }
+        }
+        // Final eviction after all children to clear remaining caches.
+        if evict_during_resolve {
+            comemo::evict(0);
         }
 
         let resolved_cells = self.fixup_cells::<T>(resolved_cells, columns)?;

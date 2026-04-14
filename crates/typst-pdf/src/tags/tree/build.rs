@@ -447,11 +447,11 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
             PdfMarkerTagKind::Label => push_tag(tree, elem, loc, Tag::Lbl),
         }
     } else if let Some(link) = elem.to_packed::<LinkMarker>() {
-        push_group(tree, elem, loc, GroupKind::Link(link.clone(), None))
+        push_group(tree, elem, loc, GroupKind::Link(Box::new((link.clone(), None))))
     } else if let Some(_) = elem.to_packed::<TitleElem>() {
         push_tag(tree, elem, loc, Tag::Title)
     } else if let Some(entry) = elem.to_packed::<OutlineEntry>() {
-        push_group(tree, elem, loc, GroupKind::OutlineEntry(entry.clone(), None))
+        push_group(tree, elem, loc, GroupKind::OutlineEntry(Box::new((entry.clone(), None))))
     } else if let Some(_) = elem.to_packed::<ListElem>() {
         // TODO: infer numbering from `list.marker`
         let numbering = ListNumbering::Circle;
@@ -478,11 +478,11 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
     } else if let Some(image) = elem.to_packed::<ImageElem>() {
         let lang = image.locale;
         let bbox = tree.ctx.new_bbox();
-        push_group(tree, elem, loc, GroupKind::Image(image.clone(), bbox, lang))
+        push_group(tree, elem, loc, GroupKind::Image(Box::new((image.clone(), bbox, lang))))
     } else if let Some(equation) = elem.to_packed::<EquationElem>() {
         let lang = equation.locale;
         let bbox = tree.ctx.new_bbox();
-        push_group(tree, elem, loc, GroupKind::Formula(equation.clone(), bbox, lang))
+        push_group(tree, elem, loc, GroupKind::Formula(Box::new((equation.clone(), bbox, lang))))
     } else if let Some(table) = elem.to_packed::<TableElem>() {
         let group_id = tree.groups.list.next_id();
         let table_id = tree.ctx.tables.next_id();
@@ -549,7 +549,7 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
         }
         push_tag(tree, elem, loc, Tag::Hn(level, Some(title)))
     } else if let Some(_) = elem.to_packed::<FootnoteElem>() {
-        push_located(tree, elem, loc, GroupKind::LogicalParent(elem.clone()))
+        push_located(tree, elem, loc, GroupKind::LogicalParent(Box::new(elem.clone())))
     } else if let Some(_) = elem.to_packed::<FootnoteEntry>() {
         push_tag(tree, elem, loc, Tag::Note)
     } else if let Some(quote) = elem.to_packed::<QuoteElem>() {
@@ -574,7 +574,7 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
         }
     } else if let Some(place) = elem.to_packed::<PlaceElem>() {
         if place.float.val() {
-            push_located(tree, elem, loc, GroupKind::LogicalParent(elem.clone()))
+            push_located(tree, elem, loc, GroupKind::LogicalParent(Box::new(elem.clone())))
         } else {
             no_progress(tree)
         }

@@ -109,19 +109,20 @@ impl TableCtx {
     }
 
     pub fn insert(&mut self, info: &CellInfo, tag: TagId, id: GroupId) {
-        let x: u32 = info.x;
-        let y: u32 = info.y;
-        let rowspan = info.rowspan;
-        let colspan = info.colspan;
+        let x: u32 = info.x();
+        let y: u32 = info.y();
+        let rowspan = info.rowspan();
+        let colspan = info.colspan();
         let meta = &*self.grid_meta;
 
-        let kind = info.kind
+        let kind = info.kind()
             .and_then(|k| match k { Smart::Custom(k) => Some(k), Smart::Auto => None })
             .unwrap_or(self.row_kinds[y as usize]);
 
         let [grid_x, grid_y] = [x, y].map(|i| meta.to_effective(i));
         let grid_cell = meta.cell(grid_x, grid_y).unwrap();
-        let stroke = grid_cell.stroke.clone().zip(grid_cell.stroke_overridden).map(
+        let pattern = meta.stroke_pattern(grid_cell);
+        let stroke = pattern.stroke.clone().zip(pattern.stroke_overridden).map(
             |(stroke, overridden)| {
                 let priority = if overridden {
                     StrokePriority::CellStroke
@@ -159,6 +160,7 @@ impl TableCtx {
         // For 100K-row tables this frees ~40 MB if this was the last reference.
         self.grid_meta = Arc::new(GridMeta {
             entries: Vec::new(),
+            unique_strokes: Vec::new(),
             content_cols: 0,
             content_rows: 0,
             has_gutter: false,

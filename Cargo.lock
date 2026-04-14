@@ -3588,6 +3588,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "serde",
  "smallvec",
+ "thin-vec",
  "typst-assets",
  "typst-layout",
  "typst-library",

@@ -432,11 +432,11 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Outline(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        GroupKind::OutlineEntry(entry, _) => {
+        GroupKind::OutlineEntry(b) => {
             if let GroupKind::Outline(outline, _) = tree.groups.get(semantic_parent).kind
             {
                 let outline_ctx = tree.ctx.outlines.get_mut(outline);
-                let entry = entry.clone();
+                let entry = b.0.clone();
                 tree.groups.get_mut(id).parent = semantic_parent;
                 outline_ctx.insert(&mut tree.groups, semantic_parent, entry, id);
             } else {

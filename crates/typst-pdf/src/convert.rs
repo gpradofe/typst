@@ -160,6 +160,13 @@ pub fn convert_streaming(
     convert_pages_from_store(&mut gc, &mut document, store)?;
 
     attach_files(&gc, &mut document)?;
+
+    // Evict comemo caches accumulated during page conversion. Text shaping
+    // and font handling are memoized, but won't be called again — tag
+    // resolution doesn't do text shaping. Freeing these caches (~69 MB)
+    // reduces peak memory during build_table.
+    comemo::evict(0);
+
     let (doc_lang, tree) = tags::resolve(&mut gc)?;
 
     document.set_outline(build_outline(&gc));

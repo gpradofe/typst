@@ -1,5 +1,6 @@
 use ecow::EcoString;
 use krilla::tagging::{ArtifactType, ListNumbering};
+use thin_vec::ThinVec;
 use typst_library::text::Locale;
 use typst_syntax::Span;
 
@@ -29,7 +30,7 @@ pub struct FlatTagTree {
 pub struct FlatTagData {
     pub kinds: Vec<ResolvedGroupKind>,
     pub spans: Vec<Span>,
-    pub children: Vec<Vec<TagNode>>,
+    pub children: Vec<ThinVec<TagNode>>,
     pub weak: Vec<bool>,
     /// Language for each group, extracted from GroupKind::lang().
     pub langs: Vec<Option<Option<Locale>>>,

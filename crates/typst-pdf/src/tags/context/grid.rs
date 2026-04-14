@@ -57,10 +57,10 @@ impl GridCtx {
     pub fn insert(&mut self, info: &CellInfo, id: GroupId) {
         self.cells.insert(CtxCell {
             data: (),
-            x: info.x,
-            y: info.y,
-            rowspan: NonZeroU32::new(info.rowspan).unwrap_or(NonZeroU32::MIN),
-            colspan: NonZeroU32::new(info.colspan).unwrap_or(NonZeroU32::MIN),
+            x: info.x(),
+            y: info.y(),
+            rowspan: NonZeroU32::new(info.rowspan()).unwrap_or(NonZeroU32::MIN),
+            colspan: NonZeroU32::new(info.colspan()).unwrap_or(NonZeroU32::MIN),
             id,
         });
     }

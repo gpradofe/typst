@@ -4,7 +4,7 @@ use rustc_hash::FxHashMap;
 use typst_library::diag::{At, SourceResult, bail};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::introspection::Locator;
+use typst_library::introspection::{Locator, LocatorLink};
 use typst_library::layout::grid::resolve::{
     Cell, CellGrid, Header, LinePosition, Repeatable,
 };
@@ -102,8 +102,12 @@ pub struct GridLayouter<'a> {
     pub(super) grid: &'a CellGrid,
     /// The regions to layout children into.
     pub(super) regions: Regions<'a>,
-    /// The locators for the each cell in the cell grid.
-    pub(super) cell_locators: FxHashMap<Axes<usize>, Locator<'a>>,
+    /// Local hashes for cell locators, indexed by non-gutter (y * cols + x).
+    pub(super) cell_locator_locals: Vec<u128>,
+    /// Shared outer link for all cell locators in this grid.
+    pub(super) cell_locator_outer: Option<&'a LocatorLink<'a>>,
+    /// Number of non-gutter columns (for flat index computation).
+    pub(super) non_gutter_cols: usize,
     /// The inherited styles.
     pub(super) styles: StyleChain<'a>,
     /// Resolved column sizes.
@@ -338,21 +342,33 @@ impl<'a> GridLayouter<'a> {
         regions.expand = Axes::new(true, false);
 
         // Prepare the locators for each cell in the cell grid.
+        // Store only the local hash (u128) per cell in a flat Vec indexed by
+        // non-gutter coordinates, instead of a HashMap with full Locator values.
+        // All locators share the same outer link.
         let mut locator = locator.split();
-        let mut cell_locators = FxHashMap::default();
+        let non_gutter_cols = grid.non_gutter_column_count();
+        let non_gutter_rows = grid.non_gutter_row_count();
+        let mut cell_locator_locals = vec![0u128; non_gutter_cols * non_gutter_rows];
+        let mut cell_locator_outer = None;
         for y in 0..grid.rows.len() {
             for x in 0..grid.cols.len() {
                 let Some(Entry::Cell(cell)) = grid.entry(x, y) else {
                     continue;
                 };
-                cell_locators.insert(Axes::new(x, y), locator.next(&cell.body.span()));
+                let loc = locator.next(&cell.body.span());
+                cell_locator_outer = loc.outer();
+                let ng_x = if grid.has_gutter { x / 2 } else { x };
+                let ng_y = if grid.has_gutter { y / 2 } else { y };
+                cell_locator_locals[ng_y * non_gutter_cols + ng_x] = loc.local();
             }
         }
 
         Self {
             grid,
             regions,
-            cell_locators,
+            cell_locator_locals,
+            cell_locator_outer,
+            non_gutter_cols,
             styles,
             rcols: vec![Abs::zero(); grid.cols.len()],
             width: Abs::zero(),
@@ -392,7 +408,13 @@ impl<'a> GridLayouter<'a> {
         pos: Axes<usize>,
         disambiguator: usize,
     ) -> Locator<'a> {
-        let mut cell_locator = self.cell_locators[&pos].relayout();
+        let ng_x = if self.grid.has_gutter { pos.x / 2 } else { pos.x };
+        let ng_y = if self.grid.has_gutter { pos.y / 2 } else { pos.y };
+        let idx = ng_y * self.non_gutter_cols + ng_x;
+        let mut cell_locator = Locator::from_parts(
+            self.cell_locator_locals[idx],
+            self.cell_locator_outer,
+        );
 
         // The disambiguator is used for repeated cells, e.g. in repeated headers.
         if disambiguator > 0 {

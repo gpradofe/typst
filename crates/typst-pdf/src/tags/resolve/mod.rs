@@ -4,6 +4,7 @@ use ecow::EcoVec;
 use krilla::tagging::{self as kt, Node, Tag, TagKind};
 use krilla::tagging::{Identifier, TagTree};
 use smallvec::SmallVec;
+use thin_vec::ThinVec;
 use typst_library::diag::{At, SourceDiagnostic, SourceResult, error};
 use typst_library::text::Locale;
 use typst_syntax::Span;
@@ -39,7 +40,7 @@ struct Resolver<'a> {
     flat: &'a FlatTagData,
     /// Children arrays, split out of FlatTagData so we can take/free them
     /// incrementally during resolve while borrowing `flat` immutably.
-    children: &'a mut Vec<Vec<TagNode>>,
+    children: &'a mut Vec<ThinVec<TagNode>>,
     tags: &'a mut TagStorage,
     annotations: &'a mut Annotations,
     last_heading_level: Option<NonZeroU16>,
