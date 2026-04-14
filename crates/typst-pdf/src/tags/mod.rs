@@ -26,6 +26,13 @@ mod resolve;
 mod tree;
 mod util;
 
+/// Run context::finish early to free heavy data (TableCtx cells, etc.)
+/// before page conversion loads additional data. Idempotent — safe to call
+/// multiple times.
+pub fn finish_context(tags: &mut Tags) {
+    context::finish(&mut tags.tree);
+}
+
 pub fn init(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tags> {
     let tree = if options.tagged {
         if options.page_ranges.is_some() {

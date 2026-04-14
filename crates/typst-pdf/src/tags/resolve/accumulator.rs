@@ -56,6 +56,10 @@ impl Accumulator {
                     let span_nodes = self.grouping_span.get_or_insert_default();
                     span_nodes.push(node);
                 }
+                Node::Ref(_) => {
+                    self.flush_grouping_span();
+                    self.buf.push(node);
+                }
             }
         } else {
             self.buf.push(node);

@@ -203,6 +203,11 @@ impl BBoxCtx {
 }
 
 pub fn finish(tree: &mut Tree) {
+    if tree.ctx_finished {
+        return;
+    }
+    tree.ctx_finished = true;
+
     for figure_id in tree.ctx.figures.ids() {
         build_figure(tree, figure_id);
     }

@@ -111,6 +111,7 @@ impl<'a> TreeBuilder<'a> {
             ctx: self.ctx,
             logical_children: self.logical_children,
             errors: self.errors,
+            ctx_finished: false,
         }
     }
 

@@ -37,6 +37,8 @@ pub struct Tree {
     pub ctx: Ctx,
     logical_children: FxHashMap<Location, SmallVec<[GroupId; 4]>>,
     pub errors: EcoVec<SourceDiagnostic>,
+    /// Whether `context::finish` has been called. Prevents double processing.
+    pub ctx_finished: bool,
 }
 
 impl Tree {
