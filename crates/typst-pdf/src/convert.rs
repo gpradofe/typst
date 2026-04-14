@@ -89,7 +89,7 @@ pub fn convert(
     tags::clear_locations(&mut gc.tags);
 
     attach_files(&gc, &mut document)?;
-    let (doc_lang, tree) = tags::resolve(&mut gc)?;
+    let (doc_lang, tree) = tags::resolve(&mut gc, &mut document)?;
 
     document.set_outline(build_outline(&gc));
     document.set_metadata(build_metadata(&gc, doc_lang));
@@ -174,7 +174,7 @@ pub fn convert_streaming(
     // resolution doesn't do text shaping.
     comemo::evict(0);
 
-    let (doc_lang, tree) = tags::resolve(&mut gc)?;
+    let (doc_lang, tree) = tags::resolve(&mut gc, &mut document)?;
 
     document.set_outline(build_outline(&gc));
     document.set_metadata(build_metadata(&gc, doc_lang));

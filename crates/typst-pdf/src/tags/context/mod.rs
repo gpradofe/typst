@@ -114,6 +114,10 @@ impl Annotations {
             .expect("annotation to be uninitialized");
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn take(&mut self, id: AnnotationId) -> Node {
         let annot = self.0[id.idx()].take().expect("initialized annotation node");
         Node::Leaf(annot)

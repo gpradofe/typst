@@ -38,7 +38,7 @@
 )
 
 --- grid-tags-internal-grid-layout-breaking-bibliography pdftags pdfstandard(ua-1) ---
-// Error: internal error: parent group (occurred at crates/typst-pdf/src/tags/tree/build.rs:232:14)
+// Error: internal error: parent group (occurred at crates/typst-pdf/src/tags/tree/build.rs:233:14)
 // Hint: please report this as a bug
 #set page(height: 140pt)
 

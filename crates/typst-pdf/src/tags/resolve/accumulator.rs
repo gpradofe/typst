@@ -42,7 +42,7 @@ impl Accumulator {
     pub fn push(&mut self, mut node: Node) {
         if self.nesting == ElementKind::Grouping {
             match &mut node {
-                Node::Group(group) => {
+                Node::Group(group) | Node::PreAllocGroup(_, group) => {
                     self.flush_grouping_span();
 
                     // Ensure ILSE have block placement when inside grouping elements.
