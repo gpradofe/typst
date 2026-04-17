@@ -318,8 +318,12 @@ fn compile_and_export(
             let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
             // Free cached file data (source text, JSON bytes, etc.) after
             // compilation. PDF export doesn't need the world's file store.
-            // Saves ~37 MB for documents with large data files.
-            world.clear_file_data();
+            // Saves ~37 MB for documents with large data files. Skipped when
+            // `--deps` is set because write_deps() needs the file-slot set to
+            // enumerate the compilation's dependencies.
+            if config.deps.is_none() {
+                world.clear_file_data();
+            }
             let result = output.and_then(|document| export_paged(document, config));
             Warned { output: result, warnings }
         }
