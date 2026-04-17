@@ -8,16 +8,16 @@ At **100,000 rows** (the largest size practical for both binaries):
 
 | Metric | Original | Optimized | Improvement |
 |--------|----------|-----------|-------------|
-| **Simple Table** — Peak RAM | 16,072 MB | 397 MB | **97% reduction** |
-| **Simple Table** — Time | 78.2s | 14.0s | **5.6x faster** |
-| **Single Table (Advanced)** — Peak RAM | 15,494 MB | 564 MB | **96% reduction** |
-| **Single Table (Advanced)** — Time | 81.8s | 30.4s | **2.7x faster** |
-| **Multi-Table (Advanced)** — Peak RAM | 14,710 MB | 687 MB | **95% reduction** |
-| **Multi-Table (Advanced)** — Time | 64.4s | 28.1s | **2.3x faster** |
+| **Simple Table** — Peak RAM | 16,087 MB | 380 MB | **98% reduction** |
+| **Simple Table** — Time | 41.8s | 14.5s | **2.9x faster** |
+| **Single Table (Advanced)** — Peak RAM | 15,491 MB | 564 MB | **96% reduction** |
+| **Single Table (Advanced)** — Time | 44.8s | 33.5s | **1.3x faster** |
+| **Multi-Table (Advanced)** — Peak RAM | 14,706 MB | 689 MB | **95% reduction** |
+| **Multi-Table (Advanced)** — Time | 36.4s | 30.9s | **1.2x faster** |
 
-At **10,000 rows** the stress template (8 complex per-department tables with gradients, badges, math equations) goes from **4,585 MB / 14.7 s** down to **503 MB / 12.0 s** — a **89 %** RAM reduction with a 1.2× speedup.
+At **10,000 rows** the stress template (8 complex per-department tables with gradients, badges, math equations) goes from **4,585 MB / 14.7 s** down to **503 MB / 12.0 s** — an **89 %** RAM reduction with a 1.2× speedup.
 
-At **600,000 rows**, the original binary requires **~90 GB of RAM** while the optimized binary uses **2.7-3.4 GB** — a **96-97 %** reduction. Speedup reaches **2.3x-3.3x** at this scale. The optimized binary further scales to **1.2 million rows** (producing 3+ GB PDFs) at peak RAM **5.5-6.8 GB**.
+At **600,000 rows**, the original binary requires **~90 GB of RAM** while the optimized binary uses **2.7-3.4 GB** — a **96 %** reduction. Speedup ranges from **1.4× (multi-table)** to **4.7× (simple)** at this scale. The optimized binary further scales to **1.2 million rows** (producing 3+ GB PDFs) at peak RAM **5.5-6.8 GB** — sizes the original binary cannot handle (projected ~180 GB).
 
 ## Overview
 
@@ -75,49 +75,48 @@ The optimized binary scales to 1.2M rows, producing 3+ GB PDFs. Scaling is appro
 
 | Template | Rows | Orig RAM (MB) | Opt RAM (MB) | RAM Saved | Orig Time | Opt Time | Speedup |
 |----------|------|---------------|--------------|-----------|-----------|----------|---------|
-| Simple | 100 | 26 | 20 | 23% | 0.17s | 0.17s | 1.0x |
-| Simple | 1,000 | 176 | 53 | 70% | 0.49s | 0.29s | 1.7x |
-| Simple | 10,000 | 1,671 | 255 | 85% | 3.83s | 1.70s | 2.3x |
-| Simple | 50,000 | 8,281 | 1,159 | 86% | 20.27s | 8.10s | 2.5x |
-| Simple | 100,000 | 16,087 | 2,490 | 85% | 41.81s | 17.10s | 2.4x |
-| Single Adv. | 100 | 30 | 17 | 43% | 0.26s | 0.17s | 1.5x |
-| Single Adv. | 1,000 | 208 | 68 | 67% | 0.50s | 0.38s | 1.3x |
-| Single Adv. | 10,000 | 1,641 | 385 | 77% | 4.03s | 2.10s | 1.9x |
-| Single Adv. | 50,000 | 7,830 | 1,736 | 78% | 20.56s | 10.50s | 2.0x |
-| Single Adv. | 100,000 | 15,491 | 3,418 | 78% | 44.83s | 21.30s | 2.1x |
-| Multi-Table | 100 | 23 | 22 | 4% | 0.16s | 0.17s | 0.9x |
-| Multi-Table | 1,000 | 184 | 78 | 58% | 0.49s | 0.33s | 1.5x |
-| Multi-Table | 10,000 | 1,615 | 419 | 74% | 3.62s | 1.90s | 1.9x |
-| Multi-Table | 50,000 | 7,528 | 1,892 | 75% | 17.39s | 10.30s | 1.7x |
-| Multi-Table | 100,000 | 14,706 | 3,702 | 75% | 36.44s | 24.70s | 1.5x |
+| Simple | 100 | 26 | 19 | 27% | 0.2s | 0.2s | 1.0x |
+| Simple | 1,000 | 176 | 25 | 86% | 0.5s | 0.3s | 1.7x |
+| Simple | 10,000 | 1,671 | 55 | 97% | 3.8s | 1.4s | 2.7x |
+| Simple | 50,000 | 8,281 | 181 | 98% | 20.3s | 7.2s | 2.8x |
+| Simple | 100,000 | 16,087 | 380 | 98% | 41.8s | 14.5s | 2.9x |
+| Single Adv. | 100 | 30 | 16 | 47% | 0.3s | 0.2s | 1.5x |
+| Single Adv. | 1,000 | 208 | 49 | 76% | 0.5s | 0.3s | 1.7x |
+| Single Adv. | 10,000 | 1,641 | 103 | 94% | 4.0s | 3.2s | 1.2x |
+| Single Adv. | 50,000 | 7,830 | 303 | 96% | 20.6s | 16.7s | 1.2x |
+| Single Adv. | 100,000 | 15,491 | 564 | 96% | 44.8s | 33.5s | 1.3x |
+| Multi-Table | 100 | 23 | 14 | 39% | 0.2s | 0.2s | 1.0x |
+| Multi-Table | 1,000 | 184 | 68 | 63% | 0.5s | 0.4s | 1.2x |
+| Multi-Table | 10,000 | 1,615 | 182 | 89% | 3.6s | 3.2s | 1.1x |
+| Multi-Table | 50,000 | 7,528 | 414 | 95% | 17.4s | 15.9s | 1.1x |
+| Multi-Table | 100,000 | 14,706 | 689 | 95% | 36.4s | 30.9s | 1.2x |
 
 ### Large Scale (300K–600K rows, Original vs Optimized)
 
 | Template | Rows | Orig RAM (MB) | Opt RAM (MB) | RAM Saved | Orig Time | Opt Time | Speedup |
 |----------|------|---------------|--------------|-----------|-----------|----------|---------|
-| Simple | 300,000 | 45,160 | 6,817 | 85% | 151.0s | 58.3s | 2.6x |
-| Simple | 600,000 | 89,972 | 13,663 | 85% | 471.3s | 144.8s | 3.3x |
-| Single Adv. | 300,000 | 45,482 | 10,108 | 78% | 193.6s | 82.7s | 2.3x |
-| Single Adv. | 600,000 | 89,862 | 20,163 | 78% | 965.4s | 214.0s | 4.5x |
-| Multi-Table | 300,000 | 41,949 | 10,911 | 74% | 115.6s | 120.9s | 1.0x |
-| Multi-Table | 600,000 | 81,591 | 21,721 | 73% | 285.4s | 542.7s | 0.5x |
+| Simple | 300,000 | 45,160 | 1,367 | 97% | 151.0s | 46.9s | 3.2x |
+| Simple | 600,000 | 89,972 | 2,741 | 97% | 471.3s | 101.3s | 4.7x |
+| Single Adv. | 300,000 | 45,482 | 1,621 | 96% | 193.6s | 111.1s | 1.7x |
+| Single Adv. | 600,000 | 89,862 | 3,198 | 96% | 965.4s | 231.5s | 4.2x |
+| Multi-Table | 300,000 | 41,949 | 1,761 | 96% | 115.6s | 97.0s | 1.2x |
+| Multi-Table | 600,000 | 81,591 | 3,388 | 96% | 285.4s | 203.7s | 1.4x |
 
 ### Optimized-Only (1.2M rows)
 
-| Template | Rows | Optimized RAM (MB) | Optimized Time | PDF Size |
-|----------|------|--------------------|----------------|----------|
-| Simple | 1,200,000 | 27,600 | 417.1s | 3,087 MB |
-| Single Adv. | 1,200,000 | 40,502 | 638.7s | 3,741 MB |
+| Template | Rows | Optimized RAM (MB) | Optimized Time |
+|----------|------|--------------------|----------------|
+| Simple | 1,200,000 | 5,499 | 352.6s |
+| Single Adv. | 1,200,000 | 6,322 | 713.0s |
+| Multi-Table | 1,200,000 | 6,806 | 414.4s |
 
 The original binary was not tested at 1.2M rows due to projected memory requirements (~180 GB).
 
-> **Note on scaling:** For the original binary, RAM scales approximately linearly (~2x from 300K→600K), peaking at ~90 GB for simple/advanced tables at 600K rows. Time scaling is super-linear for single-table-advanced (5x from 300K→600K) due to the convergence loop operating over very large pages.
+> **Note on scaling:** For the original binary, RAM scales approximately linearly, peaking at ~90 GB for simple/advanced tables at 600K rows. Time scaling is super-linear for single-table-advanced (5x from 300K→600K) due to the convergence loop operating over very large pages.
 >
-> For the optimized binary, RAM and time scale approximately linearly from 300K to 600K rows. Beyond 600K to 1.2M rows, time grows super-linearly (~3.3x for simple, ~3.7x for advanced) due to memory pressure effects at 27-40 GB RSS.
+> For the optimized binary, RAM scales linearly from 10K all the way to 1.2M (a perfectly linear ~4.5 MB / 1K rows on simple, ~5 MB / 1K rows on single-advanced, ~5.5 MB / 1K rows on multi-table). Time scales linearly up to 600K and slightly super-linearly at 1.2M due to allocator pressure at 5-7 GB RSS.
 >
-> Multi-Table at 600K rows shows an anomaly: the optimized binary is **slower** than the original (543s vs 285s). This is because the multi-table template creates ~12,000 separate table elements, and the optimized binary's periodic comemo eviction during iteration 1 destroys cross-table cache hits. Iteration 2 and the streaming pass must then recompute all table layouts from scratch, doubling the total work. The memory savings (73%) remain substantial despite the time regression.
->
-> Multi-Table at 1.2M rows was excluded — it requires ~40+ GB RAM and PDF serialization becomes impractical with ~25,000 separate table elements.
+> Multi-Table now matches single-table performance across all scales: the chunked parallel layout (default 2 concurrent runs with comemo eviction between chunks) bounds peak memory to roughly the largest individual table's footprint without sacrificing rayon speedup.
 
 ## Test Templates
 

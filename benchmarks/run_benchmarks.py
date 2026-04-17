@@ -38,26 +38,41 @@ except ImportError:
 # ── Paths ──────────────────────────────────────────────────────────────────
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-PROJECT = os.path.dirname(BASE)
+# benchmarks/ lives inside typst-source/, so the typst-source fork is the
+# parent of BASE and the research root (which contains typst-bin and the
+# tests/ directory with templates + data files) is the grandparent.
+# Env overrides (TYPST_BIN / TYPST_OPT / TYPST_DATA_DIR) are honored.
+TYPST_SOURCE = os.path.dirname(BASE)
+RESEARCH_ROOT = os.path.dirname(TYPST_SOURCE)
+DATA_DIR = os.environ.get(
+    "TYPST_DATA_DIR",
+    os.path.join(RESEARCH_ROOT, "tests"),
+)
 
-ORIGINAL = os.path.join(PROJECT, "typst-bin", "typst-x86_64-pc-windows-msvc", "typst.exe")
-OPTIMIZED = os.path.join(PROJECT, "typst-source", "target", "release", "typst.exe")
+ORIGINAL = os.environ.get(
+    "TYPST_BIN",
+    os.path.join(RESEARCH_ROOT, "typst-bin", "typst-x86_64-pc-windows-msvc", "typst.exe"),
+)
+OPTIMIZED = os.environ.get(
+    "TYPST_OPT",
+    os.path.join(TYPST_SOURCE, "target", "release", "typst.exe"),
+)
 
 # ── Templates ──────────────────────────────────────────────────────────────
 
 TEMPLATES = {
     "simple": {
-        "file": os.path.join(BASE, "table_test.typ"),
+        "file": os.path.join(DATA_DIR,"table_test.typ"),
         "data_format": "simple",
         "description": "Plain 10-column table, no styling",
     },
     "single-table-advanced": {
-        "file": os.path.join(BASE, "single_table_advanced_test.typ"),
+        "file": os.path.join(DATA_DIR,"single_table_advanced_test.typ"),
         "data_format": "advanced",
         "description": "Single giant table with group headers, styling, page headers/footers",
     },
     "multi-table": {
-        "file": os.path.join(BASE, "advanced_table_test.typ"),
+        "file": os.path.join(DATA_DIR,"advanced_table_test.typ"),
         "data_format": "advanced",
         "description": "Multiple tables (one per group), headers/footers, alternating fills",
     },
@@ -238,19 +253,19 @@ def main():
                 old_names = {100: "tiny", 1000: "small", 10000: "medium", 100000: "large",
                              500000: "xlarge", 1000000: "massive"}
                 if size in old_names:
-                    datafile = os.path.join(BASE, f"data_{old_names[size]}.json")
+                    datafile = os.path.join(DATA_DIR,f"data_{old_names[size]}.json")
                     if not os.path.exists(datafile):
-                        datafile = os.path.join(BASE, f"data_{label}.json")
+                        datafile = os.path.join(DATA_DIR,f"data_{label}.json")
                 else:
-                    datafile = os.path.join(BASE, f"data_{label}.json")
+                    datafile = os.path.join(DATA_DIR,f"data_{label}.json")
             else:
                 old_names = {100: "tiny", 1000: "small", 10000: "medium"}
                 if size in old_names:
-                    datafile = os.path.join(BASE, f"data_advanced_{old_names[size]}.json")
+                    datafile = os.path.join(DATA_DIR,f"data_advanced_{old_names[size]}.json")
                     if not os.path.exists(datafile):
-                        datafile = os.path.join(BASE, f"data_advanced_{label}.json")
+                        datafile = os.path.join(DATA_DIR,f"data_advanced_{label}.json")
                 else:
-                    datafile = os.path.join(BASE, f"data_advanced_{label}.json")
+                    datafile = os.path.join(DATA_DIR,f"data_advanced_{label}.json")
 
             if not os.path.exists(datafile):
                 print(f"\n  SKIP {tname} @ {size:,} — data file not found: {os.path.basename(datafile)}")
@@ -287,12 +302,13 @@ def main():
                     print(f"  Timeout: {timeout}s")
 
                     out_pdf = f"_bench_{bname}_{tname}_{label}.pdf"
-                    # Use relative paths and run from the tests dir to avoid
+                    # Use relative paths and run from DATA_DIR (where both the
+                    # .typ template and data_*.json files live) to avoid
                     # Windows backslash issues in Typst's --input path.
                     rel_typ = os.path.basename(tmpl["file"])
                     rel_data = os.path.basename(datafile)
                     stats = run_test(bpath, rel_typ, rel_data, out_pdf,
-                                     timeout=timeout, cwd=BASE)
+                                     timeout=timeout, cwd=DATA_DIR)
 
                     if stats["ok"]:
                         ram_ratio = round(stats["peak_ram_mb"] / data_size_mb, 1) if data_size_mb > 0.01 else 0
