@@ -917,8 +917,9 @@ pub struct Cell {
     /// `Packed<GridCell>` for show rule support. The resolved fields below
     /// are used by layout_cell for lightweight tag generation.
     pub body: Content,
-    /// The cell's fill. Boxed to save 16 bytes per cell (Option<Paint> is 24
-    /// bytes, Option<Box<Paint>> is 8 bytes). For 1M cells this saves ~16 MB.
+    /// The cell's fill. Boxed to save 16 bytes per cell (`Option<Paint>` is
+    /// 24 bytes, `Option<Box<Paint>>` is 8 bytes). For 1M cells this saves
+    /// ~16 MB.
     pub fill: Option<Box<Paint>>,
     /// The amount of columns spanned by the cell. Uses u32 instead of usize
     /// to save 4 bytes per cell (~4 MB for 1M cells). Max colspan is well

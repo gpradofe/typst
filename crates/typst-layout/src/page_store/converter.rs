@@ -25,7 +25,7 @@ pub struct FrameConverter {
     /// Image registry for resolving image references.
     pub images: ImageRegistry,
     /// Tag content objects (Content can't be serialized).
-    /// Uses Option<Content> so individual entries can be taken out
+    /// Uses `Option<Content>` so individual entries can be taken out
     /// during consuming reconstruction (freeing Content immediately
     /// instead of keeping all Content alive for the entire page loop).
     pub(super) tags: Vec<Option<Content>>,
