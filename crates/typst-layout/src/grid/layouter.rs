@@ -426,24 +426,20 @@ impl<'a> GridLayouter<'a> {
 
     /// Determines the columns sizes and then layouts the grid row-by-row.
     pub fn layout(mut self, engine: &mut Engine) -> SourceResult<Fragment> {
-        // Bypass cell-level comemo caching for large grids. This prevents
-        // accumulating paragraph cache entries that won't be reused.
-        // Also improves speed by avoiding comemo's Content hashing overhead.
+        // Bypass cell-level comemo caching for grids with ≥5000 entries.
+        // Each table cell has unique content, so comemo cache hit rate is 0%.
+        // The cache overhead (hashing Content, storing constraint, checking on
+        // iter 2) actually SLOWS DOWN iteration 2 — checking 140K miss entries
+        // takes longer than computing from scratch. Bypassing eliminates this
+        // overhead, making both iterations equally fast.
         //
-        // For truly large grids (≥5000 entries, e.g. single 500+ row table),
-        // bypass in all iterations — comemo overhead exceeds cache benefit.
-        // For medium grids (≥100 entries, e.g. multi-table 50-row tables),
-        // only bypass during iteration 1 (eviction enabled). In iteration 2,
-        // memoization enables cross-table cache hits that make the validation
-        // pass fast. Without this distinction, multi-table documents at 600K
-        // rows are 2x slower than the original binary.
-        const CELL_BYPASS_THRESHOLD: usize = 100;
-        const CELL_BYPASS_ALWAYS_THRESHOLD: usize = 5000;
+        // For small grids (<5000), keep memoization: the overhead is negligible
+        // and some cells may share content patterns across iterations.
+        const CELL_BYPASS_THRESHOLD: usize = 5_000;
         let eviction_enabled = typst_library::engine_flags::is_layout_eviction_enabled();
         let streaming = typst_library::engine_flags::is_streaming_mode();
         let entry_count = self.grid.entries.len();
-        let bypass_cell_memoize = entry_count >= CELL_BYPASS_ALWAYS_THRESHOLD
-            || (eviction_enabled && entry_count >= CELL_BYPASS_THRESHOLD);
+        let bypass_cell_memoize = entry_count >= CELL_BYPASS_THRESHOLD;
         if bypass_cell_memoize {
             typst_library::engine_flags::enable_cell_memoize_bypass();
         }
@@ -474,25 +470,6 @@ impl<'a> GridLayouter<'a> {
         // Track cumulative grid entries for table cache budget.
         typst_library::engine_flags::add_grid_entries(self.grid.entries.len());
 
-        // Multi-table bypass: when eviction is active and this grid is
-        // large enough, bypass cell-level comemo caching.
-        let table_bypass_active =
-            eviction_enabled && self.grid.entries.len() >= CELL_BYPASS_THRESHOLD;
-        if table_bypass_active {
-            typst_library::engine_flags::enable_table_level_bypass();
-        }
-        struct TableBypassGuard {
-            active: bool,
-        }
-        impl Drop for TableBypassGuard {
-            fn drop(&mut self) {
-                if self.active {
-                    typst_library::engine_flags::disable_table_level_bypass();
-                }
-            }
-        }
-        let _table_bypass_guard = TableBypassGuard { active: table_bypass_active };
-
         // Release cell Content after layout for large grids.
         // Only in streaming mode: during convergence, cell bodies are
         // part of the Arc<CellGrid> shared across iterations. Mutating
@@ -501,31 +478,25 @@ impl<'a> GridLayouter<'a> {
         let cell_release_enabled =
             streaming && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
 
-        // Grid frame flushing: write completed frames to disk for large
-        // grids. Uses a dynamic threshold based on number of finished frames
-        // rather than entry count. Small tables (few pages) stay in-memory;
-        // large tables (many pages) flush to disk to cap peak RSS.
-        // The threshold is lower in convergence mode (10 frames) because
-        // the savings per frame are higher (text shaping data ~0.3 MB/frame).
-        // In streaming mode, always flush (frame data is used once then dropped).
-        // Flush frames for tables with enough entries. During convergence,
-        // uses in-memory serialization (no file I/O) to avoid temp file
-        // overhead. During streaming, uses disk-backed storage.
-        // Only flush frames for truly large tables (matching CELL_RELEASE_THRESHOLD).
-        // Small tables (multi-table documents) don't need flushing — their frames
-        // are small and serialization overhead degrades performance significantly
-        // (contributes to 2x slowdown at 600K rows with 12,576 small tables).
-        let frame_flush_threshold: usize = if self.grid.entries.len() >= CELL_RELEASE_THRESHOLD {
+        // Grid frame flushing: write completed frames to disk for large grids.
+        // Uses a higher threshold (50K entries) to avoid serialization overhead
+        // for medium tables. The stress test (8 × 17.5K entries) was significantly
+        // slower with threshold 5K because disk I/O and cache rebuilds dominated.
+        // In streaming mode, always flush regardless of size.
+        const FLUSH_ENTRY_THRESHOLD: usize = 50_000;
+        let frame_flush_threshold: usize = if streaming
+            || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD
+        {
             1
         } else {
-            usize::MAX // small grids don't flush
+            usize::MAX // small/medium grids don't flush
         };
         // Use disk-backed frame store for large grids even during convergence.
         // MemoryFrameStore keeps all serialized frames in a Vec<u8>, consuming
         // ~1.5 GB for 100K-row tables. DiskFrameStore writes to a temp file,
         // keeping only metadata in RAM.
         let use_disk_store = streaming
-            || self.grid.entries.len() >= CELL_RELEASE_THRESHOLD;
+            || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD;
 
         let mut y = 0;
         let mut consecutive_header_count = 0;
@@ -567,10 +538,15 @@ impl<'a> GridLayouter<'a> {
             // Periodic eviction during grid layout: free all old cell
             // layout caches to bound peak memory. evict(0) frees everything,
             // trading iter2 cache hits for lower peak RSS.
-            // For 10K rows: peak drops ~200 MB, iter2 adds ~2s (still <= original).
+            // Use a higher threshold (50K entries) than CELL_RELEASE_THRESHOLD
+            // to avoid evicting shared caches (text shaping, fonts) for
+            // medium-sized tables. The stress test has 8 × 17.5K-entry tables
+            // and was 1.7× slower with threshold 5K because each table's
+            // eviction destroyed caches needed by subsequent tables.
+            const EVICT_ENTRY_THRESHOLD: usize = 50_000;
             const EVICT_PAGE_INTERVAL: usize = 15;
             if (eviction_enabled || bypass_cell_memoize)
-                && self.grid.entries.len() >= CELL_RELEASE_THRESHOLD
+                && self.grid.entries.len() >= EVICT_ENTRY_THRESHOLD
                 && self.finished.len() >= last_evict_at + EVICT_PAGE_INTERVAL
             {
                 comemo::evict(0);
@@ -1261,7 +1237,7 @@ impl<'a> GridLayouter<'a> {
 
                 if let Some(parent) = parent {
                     let cell = self.grid.cell(parent.x, parent.y).unwrap();
-                    let fill = cell.fill.clone();
+                    let fill = cell.fill.as_deref().cloned();
                     if let Some(fill) = fill {
                         let rowspan = self.grid.effective_rowspan_of_cell(cell);
                         let height = if rowspan == 1 {

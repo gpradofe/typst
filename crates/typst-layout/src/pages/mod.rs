@@ -180,13 +180,29 @@ fn layout_document_common(
     // After realization, eval closure caches (~594 MB for 100K-row tables)
     // are no longer needed — the cellgrid is stored in a separate cache
     // and children hold their own Content references. Evict during
-    // iteration 1 to free these caches before layout begins. Only for
-    // large tables (≥100K entries) where the savings are significant.
-    // Small documents skip this to preserve measurement caches.
+    // iteration 1 to free these caches before layout begins.
+    // Use cumulative grid entries (200K threshold) instead of per-table
+    // size to avoid penalizing multi-table documents with small tables
+    // (stress test: 8 × 17.5K = 140K entries). Evicting here destroys
+    // iteration 1 comemo caches, forcing iteration 2 to re-shape all text.
+    // For 100K-row tables (300K+ entries), the savings are huge (~600 MB).
+    // For stress (140K entries), savings are small (~48 MB) but rebuild
+    // cost is high (~40% slowdown).
+    // After realization, eval closure caches (~200-600 MB for large tables)
+    // are no longer needed. Evict and trim WS for large documents. Threshold:
+    // 50K entries in a single grid. This catches 100K-row templates (300K+
+    // entries) but exempts stress test (8 × 17.5K = 140K, max grid 17.5K).
+    // Stress tables need comemo caches for iteration 2 cache hits, and WS
+    // trim would cause page faults in iteration 2.
+    // Post-realization eviction ONLY for large single-table documents.
+    // For multi-table docs, eviction here can drop Content references that
+    // carry grid_meta (needed by PDF tag context). Multi-table docs
+    // instead evict between page runs in the streaming path below.
     if typst_library::engine_flags::is_layout_eviction_enabled()
-        && typst_library::layout::grid::resolve::has_large_cellgrid(100_000)
+        && typst_library::layout::grid::resolve::has_large_cellgrid(50_000)
     {
         comemo::evict(0);
+        typst_library::engine_flags::compact_heap_and_trim_ws_full();
     }
 
     let (pages, store, introspector) =
@@ -194,8 +210,6 @@ fn layout_document_common(
 
     let mut doc = PagedDocument::new(pages, info);
     if let Some(introspector) = introspector {
-        // For large documents: introspector was built incrementally
-        // during layout. Set it directly instead of lazy-building from pages.
         doc.set_introspector(introspector);
     }
     if let Some(store) = store {
@@ -231,19 +245,26 @@ fn layout_pages_streaming<'a>(
     let mut total_pages: usize = 0;
 
     let streaming = typst_library::engine_flags::is_streaming_mode();
-    // Always use streaming (per-page callback) path: each page frame is
-    // composed, finalized, and flushed to disk before the next is composed.
-    // This avoids accumulating all page frames simultaneously in
-    // layout_flow's `finished: Vec<Frame>`, which dominates peak RAM for
-    // large table documents. Page-run memoization is already disabled
-    // (enabled = false), so the parallel path provides no caching benefit.
-    let first_iteration = true;
-
-    // Flush pages to disk when: streaming mode (Phase 2), OR during the
-    // first convergence iteration for large documents. In both cases we
-    // build the introspector incrementally and drop each page after
-    // serializing it.
-    let mut flushing = streaming;
+    // Check grid sizes to decide layout strategy.
+    let has_large_grid = typst_library::layout::grid::resolve::has_large_cellgrid(50_000);
+    // Cumulative counter tracks ALL grid entries processed during realization,
+    // even after the CellGrid cache is cleared (MAX_CELLGRID_CACHE = 30).
+    // This correctly identifies multi-table documents with many small tables
+    // (e.g., 2076 tables × 500 entries = 1M cumulative).
+    let cumulative_entries = typst_library::engine_flags::cumulative_grid_entries();
+    let run_count = items.iter().filter(|i| matches!(i, Item::Run(..))).count();
+    // Layout strategy:
+    // - Large single table: streaming (per-page eviction + DiskPageStore)
+    // - Many tables in few runs (multi-table template): streaming
+    //   All tables are in 1-3 runs, no parallelism benefit from rayon.
+    // - Many tables in many runs (stress test): parallel with DiskPageStore
+    //   Each department has its own page run (8+ runs). Rayon gives 2-3x
+    //   speedup. Pages flushed to disk after parallel results arrive.
+    let has_many_tables = cumulative_entries >= 50_000;
+    let use_streaming_layout = has_large_grid
+        || (has_many_tables && run_count <= 4);
+    // Flush to DiskPageStore for all large documents (streaming or parallel).
+    let mut flushing = streaming || use_streaming_layout || has_many_tables;
     let mut store: Option<DiskPageStore> = if flushing {
         Some(
             DiskPageStore::new()
@@ -253,8 +274,15 @@ fn layout_pages_streaming<'a>(
     } else {
         None
     };
+    // In streaming mode (Phase 2), skip building the introspector — Phase 1's
+    // converged introspector is reused instead, saving ~104 MB.
+    // For Phase 1, build incrementally during layout as before.
     let mut intro_builder: Option<PagedIntrospectorBuilder> =
-        if flushing { Some(PagedIntrospectorBuilder::with_capacity(0)) } else { None };
+        if flushing && !streaming {
+            Some(PagedIntrospectorBuilder::with_capacity(0))
+        } else {
+            None
+        };
 
     // Shared logic: process a single finalized page (flush or accumulate).
     let process_page = |page: Page,
@@ -268,7 +296,7 @@ fn layout_pages_streaming<'a>(
         // Flush in ALL iterations to bound peak memory. Without this,
         // iter2+ accumulates all pages in memory (~27GB at 600K rows),
         // causing heavy swapping on 32GB machines.
-        if !*flushing && *total_pages + 1 > FLUSH_THRESHOLD {
+        if !*flushing && has_large_grid && *total_pages + 1 > FLUSH_THRESHOLD {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
@@ -286,7 +314,9 @@ fn layout_pages_streaming<'a>(
         }
 
         if *flushing {
-            intro_builder.as_mut().unwrap().discover_page(*total_pages, &page);
+            if let Some(ib) = intro_builder.as_mut() {
+                ib.discover_page(*total_pages, &page);
+            }
             store
                 .as_mut()
                 .unwrap()
@@ -304,7 +334,7 @@ fn layout_pages_streaming<'a>(
     // processing. This avoids accumulating all page frames in memory —
     // each page is finalized, flushed to disk, and dropped before the next
     // is produced. For subsequent iterations, use the parallel memoized path.
-    if first_iteration {
+    if use_streaming_layout {
         for item in &items {
             match item {
                 Item::Run(children, initial, run_locator) => {
@@ -353,25 +383,57 @@ fn layout_pages_streaming<'a>(
                             page_idx += 1;
 
                             // Periodic comemo eviction during streaming layout.
-                            // For multi-table documents, small tables never trigger
-                            // grid-level eviction (entries < 5000), but their comemo
-                            // cache entries accumulate unboundedly across pages.
-                            // Evict every 50 pages to bound cache growth while
-                            // preserving enough locality for complex table styling.
-                            // At 50 pages (~10-15 small tables), comemo accumulates
-                            // ~30-50 MB; evicting keeps peak bounded at ~100 MB
-                            // for the cache portion.
-                            const PAGE_EVICT_INTERVAL: usize = 50;
-                            if flushing
-                                && total_pages >= last_evict_page + PAGE_EVICT_INTERVAL
-                            {
-                                comemo::evict(0);
-                                last_evict_page = total_pages;
+                            // Shaped text and inline layout caches accumulate
+                            // ~2-3 MB per page. Evict periodically to bound
+                            // cache growth.
+                            // - Large single-table: evict every 5 pages with
+                            //   HeapCompact (cheap ~sub-100ms). Full WS trim
+                            //   (SetProcessWorkingSetSize, ~500ms+ each call)
+                            //   only every 25 pages at major boundaries.
+                            //   At every-5 full trim, a 600K-row table with
+                            //   1500 pages would burn ~300s on WS trim alone.
+                            // - Multi-table streaming: evict every 50 pages.
+                            if has_large_grid && flushing {
+                                const EVICT_INTERVAL: usize = 5;
+                                const TRIM_INTERVAL: usize = 25;
+                                if total_pages >= last_evict_page + EVICT_INTERVAL
+                                {
+                                    comemo::evict(0);
+                                    if total_pages / TRIM_INTERVAL
+                                        > last_evict_page / TRIM_INTERVAL
+                                    {
+                                        typst_library::engine_flags::compact_heap_and_trim_ws_full();
+                                    } else {
+                                        typst_library::engine_flags::compact_heap_and_trim_ws();
+                                    }
+                                    last_evict_page = total_pages;
+                                }
+                            } else if use_streaming_layout {
+                                // Multi-table docs: evict every 50 pages.
+                                // Less aggressive than single-table to preserve
+                                // some cross-table cache locality.
+                                let evict_interval: usize = 50;
+                                if total_pages >= last_evict_page + evict_interval {
+                                    comemo::evict(0);
+                                    last_evict_page = total_pages;
+                                }
                             }
 
                             Ok(())
                         },
                     )?;
+
+                    // Between-run cleanup when flushing to disk.
+                    // - Large single-table: full WS trim + eviction (one run).
+                    // - Multi-table streaming: lightweight evict only — frees
+                    //   the previous table's comemo cache without the expensive
+                    //   SetProcessWorkingSetSize call that causes page faults.
+                    if flushing {
+                        comemo::evict(0);
+                        if has_large_grid {
+                            typst_library::engine_flags::compact_heap_and_trim_ws_full();
+                        }
+                    }
                 }
                 Item::Parity(parity, initial, par_locator) => {
                     if !parity.matches(total_pages) {
@@ -400,66 +462,120 @@ fn layout_pages_streaming<'a>(
             }
         }
     } else {
-        // Subsequent iterations: use parallel memoized page runs.
-        let mut runs = engine.parallelize(
-            items.iter().filter_map(|item| match item {
-                Item::Run(children, initial, locator) => {
-                    Some((children, initial, locator.relayout()))
-                }
-                _ => None,
-            }),
-            |engine, (children, initial, locator)| {
-                layout_page_run(engine, children, locator, *initial)
-            },
-        );
+        // Chunked parallel page runs via rayon. Used for documents with many
+        // page runs (e.g., stress test with 8 departments). Instead of running
+        // all runs in parallel (which holds all tables' comemo caches alive
+        // simultaneously, ~1.4 GB peak), we process runs in small chunks. Each
+        // chunk runs in parallel, then results are flushed to disk and comemo
+        // is evicted before the next chunk starts. This caps in-flight memory
+        // at CHUNK_SIZE × per-table-cost rather than all-tables × per-table.
+        //
+        // Wall-time impact: For run_count=8 with CHUNK_SIZE=2 on 32 cores,
+        // we trade 8-way parallelism for 2-way. The largest table dominates
+        // each chunk's wall time; total = sum of largest in each chunk.
+        const CHUNK_SIZE: usize = 2;
 
-        for item in &items {
-            match item {
-                Item::Run(..) => {
-                    let layouted = runs.next().unwrap()?;
-                    for layouted in layouted {
-                        let page = finalize(engine, &mut counter, &mut tags, layouted)?;
-                        process_page(
-                            page,
-                            &mut total_pages,
-                            &mut pages,
-                            &mut store,
-                            &mut intro_builder,
-                            &mut flushing,
-                        )?;
+        let mut i = 0;
+        while i < items.len() {
+            if matches!(items[i], Item::Run(..)) {
+                // Find consecutive Run items starting at i.
+                let mut j = i;
+                while j < items.len() && matches!(items[j], Item::Run(..)) {
+                    j += 1;
+                }
+                // Process the run range [i..j] in chunks of CHUNK_SIZE.
+                let mut k = i;
+                while k < j {
+                    let chunk_end = (k + CHUNK_SIZE).min(j);
+                    let chunk_args: Vec<_> = items[k..chunk_end]
+                        .iter()
+                        .map(|item| match item {
+                            Item::Run(children, initial, locator) => {
+                                (*children, *initial, locator.relayout())
+                            }
+                            _ => unreachable!(),
+                        })
+                        .collect();
+
+                    let results: Vec<_> = engine
+                        .parallelize(
+                            chunk_args.into_iter(),
+                            |engine, (children, initial, locator)| {
+                                layout_page_run(engine, children, locator, initial)
+                            },
+                        )
+                        .collect();
+
+                    for layouted in results {
+                        let layouted = layouted?;
+                        for lp in layouted {
+                            let page =
+                                finalize(engine, &mut counter, &mut tags, lp)?;
+                            process_page(
+                                page,
+                                &mut total_pages,
+                                &mut pages,
+                                &mut store,
+                                &mut intro_builder,
+                                &mut flushing,
+                            )?;
+                        }
                     }
 
-                    // Evict comemo caches when pages are flushed in
-                    // streaming mode. During convergence, caches are
-                    // needed for iter2 cache hits.
-                    if flushing && streaming {
+                    // Evict this chunk's comemo caches before the next chunk
+                    // starts. Each chunk's tables are fully laid out, finalized,
+                    // and flushed to disk by this point — we no longer need
+                    // their cached layouts, text shapes, or fragments.
+                    // Use full WS trim only on intermediate chunks (not the
+                    // last). The next chunk accesses different Content
+                    // sub-trees (different departments), so a one-time
+                    // re-fault recovers ~200 MB of RSS. The last chunk skips
+                    // WS trim since no further layout work follows.
+                    let is_last_chunk = chunk_end >= j;
+                    if flushing && has_many_tables {
                         comemo::evict(0);
+                        if is_last_chunk {
+                            typst_library::engine_flags::compact_heap_and_trim_ws();
+                        } else {
+                            typst_library::engine_flags::compact_heap_and_trim_ws_full();
+                        }
                     }
+
+                    k = chunk_end;
                 }
-                Item::Parity(parity, initial, par_locator) => {
-                    if !parity.matches(total_pages) {
-                        continue;
+                i = j;
+            } else {
+                match &items[i] {
+                    Item::Parity(parity, initial, par_locator) => {
+                        if parity.matches(total_pages) {
+                            let layouted = layout_blank_page(
+                                engine,
+                                par_locator.relayout(),
+                                *initial,
+                            )?;
+                            let page =
+                                finalize(engine, &mut counter, &mut tags, layouted)?;
+                            process_page(
+                                page,
+                                &mut total_pages,
+                                &mut pages,
+                                &mut store,
+                                &mut intro_builder,
+                                &mut flushing,
+                            )?;
+                        }
                     }
-                    let layouted =
-                        layout_blank_page(engine, par_locator.relayout(), *initial)?;
-                    let page = finalize(engine, &mut counter, &mut tags, layouted)?;
-                    process_page(
-                        page,
-                        &mut total_pages,
-                        &mut pages,
-                        &mut store,
-                        &mut intro_builder,
-                        &mut flushing,
-                    )?;
+                    Item::Tags(tag_items) => {
+                        tags.extend(
+                            tag_items
+                                .iter()
+                                .filter_map(|(c, _)| c.to_packed::<TagElem>())
+                                .map(|elem| elem.tag.clone()),
+                        );
+                    }
+                    Item::Run(..) => unreachable!(),
                 }
-                Item::Tags(items) => {
-                    tags.extend(
-                        items
-                            .iter()
-                            .filter_map(|(c, _)| c.to_packed::<TagElem>())
-                            .map(|elem| elem.tag.clone()),
-                    );
-                }
+                i += 1;
             }
         }
     }

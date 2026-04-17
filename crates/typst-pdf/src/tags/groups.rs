@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 
 use krilla::tagging::{ArtifactType, Identifier, ListNumbering, TagKind};
 use rustc_hash::FxHashMap;
-use thin_vec::ThinVec;
+use smallvec::SmallVec;
 use typst_library::foundations::{Content, Packed, Smart};
 use typst_library::introspection::{CellTagMeta, Location};
 use typst_library::layout::{GridCell, Inherit};
@@ -17,8 +17,11 @@ use crate::tags::context::{
     AnnotationId, BBoxId, FigureId, GridId, ListId, OutlineId, TableId, TagId,
 };
 
-// Verify sizes: Group=48, GroupKind=24, CellInfo=12
-const _: () = assert!(std::mem::size_of::<Group>() <= 56);
+// Verify sizes: Group uses SmallVec<[TagNode; 1]> for inline storage of
+// single-child table cells, avoiding 980K heap allocations (~110 MB).
+// Group grows from ~56 to ~72 bytes (+19 MB for 1.2M groups) but saves
+// ~110 MB in heap fragmentation → net ~90 MB savings.
+const _: () = assert!(std::mem::size_of::<Group>() <= 80);
 const _: () = assert!(std::mem::size_of::<GroupKind>() <= 32);
 const _: () = assert!(std::mem::size_of::<CellInfo>() <= 16);
 use crate::tags::flat::{FlatTagData, FlatTagTree, ResolvedGroupKind};
@@ -58,6 +61,16 @@ impl Groups {
     /// avoids ~69 MB alive at peak during build_table.
     pub fn clear_locations(&mut self) {
         self.locations = FxHashMap::default();
+    }
+
+    /// Shrink all group ThinVec children to their exact length. Called after
+    /// page conversion (when all text leaves have been pushed) and before
+    /// context::finish (which creates temporary StrokeGrid overlapping with
+    /// children). Frees excess ThinVec capacity (~47 MB for 100K-row tables).
+    pub fn shrink_all_nodes(&mut self) {
+        for group in self.list.iter_mut() {
+            group.shrink_nodes();
+        }
     }
 
     #[cfg_attr(debug_assertions, track_caller)]
@@ -375,9 +388,12 @@ impl Groups {
         debug_assert!({
             children.iter().all(|child| self.check_ancestor(parent, *child))
         });
-        self.get_mut(parent)
-            .nodes
-            .splice(..0, children.iter().map(|id| TagNode::Group(*id)));
+        let nodes = &mut self.get_mut(parent).nodes;
+        // Build new SmallVec with children prepended, then existing nodes.
+        let mut new_nodes = SmallVec::with_capacity(children.len() + nodes.len());
+        new_nodes.extend(children.iter().map(|id| TagNode::Group(*id)));
+        new_nodes.extend(nodes.drain(..));
+        *nodes = new_nodes;
     }
 
     /// Append an existing group to the end of the parent.
@@ -451,6 +467,16 @@ impl TagStorage {
     pub fn take(&mut self, id: TagId) -> TagKind {
         *self.0[id.idx()].take().expect("tag")
     }
+
+    /// Reserve space for at least `additional` more elements.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
+    /// Shrink the backing Vec to fit its length, freeing excess capacity.
+    pub fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -471,9 +497,11 @@ pub struct Group {
     pub span: Span,
     pub kind: GroupKind,
     /// Only allow mutating this list through the API, to ensure the parent
-    /// will be set for child groups. Uses ThinVec (8 bytes vs Vec's 24)
-    /// to reduce Group from 80 to 64 bytes — saving ~34 MB for 1M groups.
-    nodes: ThinVec<TagNode>,
+    /// will be set for child groups. Uses SmallVec<[TagNode; 1]> to store
+    /// the first child inline. For table cells (980K groups), this avoids
+    /// a heap allocation entirely (~110 MB savings from eliminated
+    /// allocator overhead + fragmentation for 980K single-element ThinVecs).
+    nodes: SmallVec<[TagNode; 1]>,
     /// Whether this group was split off another group as a result of
     /// overlapping tags. A weak group will be omitted if it has no children.
     pub weak: bool,
@@ -481,11 +509,11 @@ pub struct Group {
 
 impl Group {
     fn new(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: ThinVec::new(), weak: false }
+        Group { parent, span, kind, nodes: SmallVec::new(), weak: false }
     }
 
     fn weak(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: ThinVec::new(), weak: true }
+        Group { parent, span, kind, nodes: SmallVec::new(), weak: true }
     }
 
     pub fn nodes(&self) -> &[TagNode] {
@@ -518,6 +546,12 @@ impl Group {
 
     pub fn pop_node(&mut self) -> Option<TagNode> {
         self.nodes.pop()
+    }
+
+    /// Shrink the children storage to its exact length. For SmallVec with
+    /// spilled data, this frees excess heap capacity.
+    pub fn shrink_nodes(&mut self) {
+        self.nodes.shrink_to_fit();
     }
 }
 

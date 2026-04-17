@@ -67,7 +67,7 @@ pub fn layout_par(
 }
 
 /// The internal, memoized implementation of `layout_par`.
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_par_impl(
     elem: &Packed<ParElem>,

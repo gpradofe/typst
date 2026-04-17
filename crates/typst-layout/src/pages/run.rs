@@ -72,11 +72,17 @@ pub fn layout_page_run(
 }
 
 /// The internal implementation of `layout_page_run`.
-// Disable page-run memoization. The cached Vec<LayoutedPage> holds all
-// page frames, and the introspector changes between convergence iterations
-// so the cache never hits anyway. Lower-level caches (fragment, table,
-// cell) provide the iter2 speedup.
-#[comemo::memoize(enabled = false)]
+// Page-run memoization is disabled during streaming (Phase 2) AND during
+// iteration 1 (layout eviction enabled). In iter 1, comemo builds constraint
+// data tracking all Sink modifications (~168 MB for 1M-cell tables). This is
+// pure overhead when:
+// - The document stabilizes in 1 iteration (constraint never checked)
+// - The document uses counter(page).final() (page runs always miss in iter 2)
+// By disabling in iter 1, we save ~168 MB peak RAM. In iter 2, page-run
+// caching activates for potential cache hits on pages without introspector
+// access. For large-table documents, cell bypass means page-run cache misses
+// anyway, so the constraint data is wasted either way.
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_page_run_impl(
     routines: &Routines,

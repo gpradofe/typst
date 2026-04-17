@@ -25,7 +25,10 @@ pub struct FrameConverter {
     /// Image registry for resolving image references.
     pub images: ImageRegistry,
     /// Tag content objects (Content can't be serialized).
-    pub(super) tags: Vec<Content>,
+    /// Uses Option<Content> so individual entries can be taken out
+    /// during consuming reconstruction (freeing Content immediately
+    /// instead of keeping all Content alive for the entire page loop).
+    pub(super) tags: Vec<Option<Content>>,
     /// Gradient objects (contain Arc, can't be serialized).
     pub(super) gradients: Vec<Gradient>,
     /// Tiling objects (contain Frame, can't be serialized).
@@ -238,7 +241,7 @@ impl FrameConverter {
         match tag {
             Tag::Start(content, loc, flags) => {
                 let id = self.tags.len() as u32;
-                self.tags.push(content.clone());
+                self.tags.push(Some(content.clone()));
                 STag::Start(
                     id,
                     loc.hash(),
@@ -478,6 +481,130 @@ impl FrameConverter {
         self.tags = Vec::new();
     }
 
+    // --- Consuming reconstruction variants ---
+    //
+    // These are identical to reconstruct_frame/frame_item/group except they
+    // call reconstruct_tag_consuming for Tag items, which takes Content out
+    // of the tag registry via Option::take(). This frees Content references
+    // per-page during the tag tree build loop instead of accumulating all
+    // ~377 MB until the loop finishes.
+
+    pub fn reconstruct_frame_consuming(&mut self, sf: SFrame) -> Frame {
+        let kind = match sf.kind {
+            SFrameKind::Soft => FrameKind::Soft,
+            SFrameKind::Hard => FrameKind::Hard,
+        };
+        let size = Size::new(Abs::raw(sf.width), Abs::raw(sf.height));
+        let mut frame = Frame::new(size, kind);
+        if let Some(b) = sf.baseline {
+            frame.set_baseline(Abs::raw(b));
+        }
+        let items: Vec<(Point, FrameItem)> = sf
+            .items
+            .into_iter()
+            .map(|(sp, si)| {
+                let point = Point::new(Abs::raw(sp.x), Abs::raw(sp.y));
+                let item = self.reconstruct_frame_item_consuming(si);
+                (point, item)
+            })
+            .collect();
+        frame.push_multiple(items);
+        frame
+    }
+
+    fn reconstruct_frame_item_consuming(&mut self, si: SFrameItem) -> FrameItem {
+        match si {
+            SFrameItem::Group(g) => {
+                FrameItem::Group(self.reconstruct_group_consuming(g))
+            }
+            SFrameItem::Text(t) => FrameItem::Text(self.reconstruct_text(t)),
+            SFrameItem::Shape(s, span) => {
+                FrameItem::Shape(self.reconstruct_shape(s), raw_to_span(span))
+            }
+            SFrameItem::Image(img_ref, w, h, span) => {
+                let image = self
+                    .images
+                    .resolve(img_ref.data_hash)
+                    .expect("image not found in registry");
+                FrameItem::Image(
+                    image,
+                    Size::new(Abs::raw(w), Abs::raw(h)),
+                    raw_to_span(span),
+                )
+            }
+            SFrameItem::Link(dest, w, h) => FrameItem::Link(
+                self.reconstruct_destination(dest),
+                Size::new(Abs::raw(w), Abs::raw(h)),
+            ),
+            SFrameItem::Tag(tag) => {
+                FrameItem::Tag(self.reconstruct_tag_consuming(tag))
+            }
+        }
+    }
+
+    fn reconstruct_group_consuming(&mut self, sg: SGroupItem) -> GroupItem {
+        GroupItem {
+            frame: self.reconstruct_frame_consuming(sg.frame),
+            transform: Transform {
+                sx: Ratio::new(sg.transform.sx),
+                ky: Ratio::new(sg.transform.ky),
+                kx: Ratio::new(sg.transform.kx),
+                sy: Ratio::new(sg.transform.sy),
+                tx: Abs::raw(sg.transform.tx),
+                ty: Abs::raw(sg.transform.ty),
+            },
+            clip: sg.clip.map(reconstruct_curve),
+            label: sg.label.and_then(|s| Label::new(PicoStr::intern(&s))),
+            parent: sg.parent.map(|p| FrameParent {
+                location: Location::new(p.location),
+                inherit: if p.inherit { Inherit::Yes } else { Inherit::No },
+            }),
+        }
+    }
+
+    /// Like reconstruct_tag, but takes the Content out of the tag registry,
+    /// freeing the reference immediately. Used during tag tree building
+    /// (build_from_store) to avoid keeping all Content alive for the entire
+    /// page loop. Each tag ID is consumed at most once.
+    pub fn reconstruct_tag_consuming(&mut self, st: STag) -> Tag {
+        match st {
+            STag::Start(id, loc, flags) => {
+                let tag_flags = TagFlags {
+                    introspectable: flags.introspectable,
+                    tagged: flags.tagged,
+                };
+                if let Some(content) = self.tags.get_mut(id as usize).and_then(|opt| opt.take()) {
+                    Tag::Start(content, Location::new(loc), tag_flags)
+                } else {
+                    Tag::CellStart(
+                        CellTagMeta {
+                            x: 0,
+                            y: 0,
+                            colspan: 1,
+                            rowspan: 1,
+                            kind: CellTagKind::TableData,
+                        },
+                        Location::new(loc),
+                        tag_flags,
+                    )
+                }
+            }
+            STag::End(loc, key, flags) => Tag::End(
+                Location::new(loc),
+                key,
+                TagFlags {
+                    introspectable: flags.introspectable,
+                    tagged: flags.tagged,
+                },
+            ),
+            STag::CellStart(smeta, loc, flags) => {
+                // Delegate to the non-consuming version since CellStart
+                // doesn't reference Content.
+                self.reconstruct_tag(STag::CellStart(smeta, loc, flags))
+            }
+        }
+    }
+
     pub fn reconstruct_tag(&self, st: STag) -> Tag {
         match st {
             STag::Start(id, loc, flags) => {
@@ -485,11 +612,10 @@ impl FrameConverter {
                     introspectable: flags.introspectable,
                     tagged: flags.tagged,
                 };
-                if (id as usize) < self.tags.len() {
-                    let content = self.tags[id as usize].clone();
-                    Tag::Start(content, Location::new(loc), tag_flags)
+                if let Some(Some(content)) = self.tags.get(id as usize) {
+                    Tag::Start(content.clone(), Location::new(loc), tag_flags)
                 } else {
-                    // Tags cleared — return CellStart with dummy metadata.
+                    // Tags cleared or taken — return CellStart with dummy metadata.
                     // Only tag boundaries (start/end) and flags matter for
                     // PDF content rendering; Content is not accessed.
                     Tag::CellStart(

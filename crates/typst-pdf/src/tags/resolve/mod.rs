@@ -4,7 +4,6 @@ use ecow::EcoVec;
 use krilla::tagging::{self as kt, Node, PdfRef, Tag, TagKind, TagSerializer};
 use krilla::tagging::{Identifier, TagTree};
 use smallvec::SmallVec;
-use thin_vec::ThinVec;
 use typst_library::diag::{At, SourceDiagnostic, SourceResult, error};
 use typst_library::text::Locale;
 use typst_syntax::Span;
@@ -40,7 +39,7 @@ struct Resolver<'a> {
     flat: &'a FlatTagData,
     /// Children arrays, split out of FlatTagData so we can take/free them
     /// incrementally during resolve while borrowing `flat` immutably.
-    children: &'a mut Vec<ThinVec<TagNode>>,
+    children: &'a mut Vec<SmallVec<[TagNode; 1]>>,
     tags: &'a mut TagStorage,
     annotations: &'a mut Annotations,
     last_heading_level: Option<NonZeroU16>,
@@ -66,6 +65,23 @@ pub fn resolve(
 
     if !disabled(gc) {
         context::finish(&mut gc.tags.tree);
+
+        // After context::finish, TableCtx cells (~72 MB) and StrokeGrid (~64 MB)
+        // have been freed. Shrink Groups.list to reclaim Vec doubling waste
+        // (~61 MB for 1M-cell tables: 2M capacity shrunk to 1M actual entries).
+        // This must happen AFTER finish (which adds row/body groups) but BEFORE
+        // flatten (which drains the list into compact parallel arrays).
+        gc.tags.tree.groups.list.shrink_to_fit();
+        gc.tags.tree.groups.tags.shrink_to_fit();
+        // Adaptive trim: full WS trim only for large documents (>= 200K
+        // cumulative grid entries) where the saved ~500 MB of RSS prevents
+        // swap during tag flattening. For smaller documents, the cheaper
+        // HeapCompact suffices and saves ~500ms of page-fault cost.
+        if typst_library::engine_flags::cumulative_grid_entries() >= 200_000 {
+            typst_library::engine_flags::compact_heap_and_trim_ws_full();
+        } else {
+            typst_library::engine_flags::compact_heap_and_trim_ws();
+        }
     }
 
     // Extract doc_lang from root BEFORE flattening (flatten drains the list).

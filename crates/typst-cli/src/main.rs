@@ -2,6 +2,10 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+#[cfg(all(feature = "rpmalloc", not(feature = "dhat-heap")))]
+#[global_allocator]
+static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
+
 mod args;
 mod compile;
 mod completions;

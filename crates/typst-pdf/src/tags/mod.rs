@@ -40,6 +40,13 @@ pub fn clear_locations(tags: &mut Tags) {
     tags.tree.groups.clear_locations();
 }
 
+/// Shrink all group ThinVec children to exact size. Call after page
+/// conversion (all text leaves pushed) and before resolve (context::finish
+/// creates temporary overlapping allocations).
+pub fn shrink_children(tags: &mut Tags) {
+    tags.tree.groups.shrink_all_nodes();
+}
+
 pub fn init(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tags> {
     let tree = if options.tagged {
         if options.page_ranges.is_some() {
@@ -54,10 +61,12 @@ pub fn init(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tags
 }
 
 /// Build tags from pages stored in a DiskPageStore. Reads pages one at a time.
+/// Takes `&mut store` so it can clear Content from the tag registry after
+/// page iteration, before the expensive context::finish() runs.
 pub fn init_from_store(
     document: &PagedDocument,
     options: &PdfOptions,
-    store: &typst_layout::page_store::DiskPageStore,
+    store: &mut typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<Tags> {
     let tree = if options.tagged {
         if options.page_ranges.is_some() {

@@ -49,6 +49,21 @@ impl<T> IdVec<T> {
         self.inner.drain(..)
     }
 
+    /// Reserve space for at least `additional` more elements.
+    pub fn reserve(&mut self, additional: usize) {
+        self.inner.reserve(additional);
+    }
+
+    /// Returns the current capacity of the backing Vec.
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Shrink the backing Vec to fit its length, freeing excess capacity.
+    pub fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
+    }
+
     pub fn ids(
         &self,
     ) -> impl ExactSizeIterator<Item = Id<T>> + DoubleEndedIterator + use<T> {

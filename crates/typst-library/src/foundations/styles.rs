@@ -211,6 +211,42 @@ impl Repr for Styles {
     }
 }
 
+/// Interns a `Styles` value, returning a shared clone if an identical
+/// `Styles` already exists in the thread-local cache. This is critical
+/// for memory optimization in large table documents where hundreds of
+/// thousands of cells share identical styling (e.g., all cells in a
+/// column have the same text properties). Instead of 500K separate
+/// EcoVec allocations (~126 MB), we get ~5 unique allocations shared
+/// via refcount.
+///
+/// EcoVec is COW (copy-on-write), so shared Styles are safe: any mutation
+/// automatically creates a new copy via `make_mut()`.
+pub fn intern_styles(styles: Styles) -> Styles {
+    use std::cell::RefCell;
+    use std::collections::hash_map::DefaultHasher;
+
+    thread_local! {
+        static CACHE: RefCell<FxHashMap<u64, Styles>> = RefCell::new(FxHashMap::default());
+    }
+
+    // Compute a hash of the Styles content.
+    let mut hasher = DefaultHasher::new();
+    styles.hash(&mut hasher);
+    let key = hasher.finish();
+
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(cached) = cache.get(&key) {
+            if *cached == styles {
+                return cached.clone(); // EcoVec clone = refcount increment, O(1)
+            }
+            // Hash collision — extremely rare, just use the new styles
+        }
+        cache.insert(key, styles.clone());
+        styles
+    })
+}
+
 /// A single style property or recipe.
 #[derive(Clone, Hash)]
 pub enum Style {

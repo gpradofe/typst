@@ -37,6 +37,7 @@ pub struct TableCtx {
     cells: GridCells<TableCellData>,
     border_thickness: Option<f32>,
     border_color: Option<NaiveRgbColor>,
+    border_style: Option<kt::BorderStyle>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +105,7 @@ impl TableCtx {
             cells: GridCells::new(width, height),
             border_thickness: None,
             border_color: None,
+            border_style: None,
         }
     }
 
@@ -132,6 +134,7 @@ impl TableCtx {
             .with_summary(self.summary.as_ref().map(Into::into))
             .with_border_thickness(self.border_thickness.map(kt::Sides::uniform))
             .with_border_color(self.border_color.map(kt::Sides::uniform))
+            .with_border_style(self.border_style.map(kt::Sides::uniform))
             .into()
     }
 
@@ -319,7 +322,7 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
         }
     }
 
-    (table_ctx.border_thickness, table_ctx.border_color) =
+    (table_ctx.border_thickness, table_ctx.border_color, table_ctx.border_style) =
         try_resolve_table_stroke_from_grid(&stroke_grid, &table_ctx.cells);
 
     let mut chunk_kind = table_ctx.row_kinds[0];
@@ -375,6 +378,7 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
                     grid,
                     table_ctx.border_thickness,
                     table_ctx.border_color,
+                    table_ctx.border_style,
                     [cell.x, cell.y],
                     cell_stroke,
                     &mut tag,
@@ -655,7 +659,7 @@ fn prioritize_grid_strokes<F>(
 fn try_resolve_table_stroke_from_grid(
     stroke_grid: &StrokeGrid,
     cells: &GridCells<TableCellData>,
-) -> (Option<f32>, Option<NaiveRgbColor>) {
+) -> (Option<f32>, Option<NaiveRgbColor>, Option<kt::BorderStyle>) {
     // Omitted strokes are counted too for reasons explained above.
     let mut strokes = FxHashMap::<_, usize>::default();
     for cell in cells.iter().filter_map(GridEntry::as_cell) {
@@ -672,19 +676,24 @@ fn try_resolve_table_stroke_from_grid(
         let s = (**s?).clone();
         Some(s.unwrap_or_default())
     });
-    let Some(stroke) = stroke else { return (None, None) };
+    let Some(stroke) = stroke else { return (None, None, None) };
 
-    // Only set a parent stroke width if the table uses one uniform stroke.
+    // Only set parent stroke attributes if the table uses one uniform stroke.
     let thickness = uniform_stroke.then_some(stroke.thickness.to_f32());
+    let style = uniform_stroke.then_some(match stroke.dash {
+        Some(_) => kt::BorderStyle::Dashed,
+        None => kt::BorderStyle::Solid,
+    });
     let color = util::paint_to_color(&stroke.paint);
 
-    (thickness, color)
+    (thickness, color, style)
 }
 
 fn resolve_cell_border_and_background(
     grid: &GridMeta,
     parent_border_thickness: Option<f32>,
     parent_border_color: Option<NaiveRgbColor>,
+    parent_border_style: Option<kt::BorderStyle>,
     pos: [u32; 2],
     stroke: &Sides<PrioritzedStroke>,
     tag: &mut TagKind,
@@ -696,8 +705,9 @@ fn resolve_cell_border_and_background(
 
     // Acrobat completely ignores the border style attribute, but the spec
     // defines `BorderStyle::None` as the default. So make sure to write
-    // the correct border styles.
-    let border_style = resolve_sides(&fixed, None, Some(kt::BorderStyle::None), |s| {
+    // the correct border styles. When a parent border_style is set (uniform
+    // tables), cells that match inherit it → no per-cell attribute needed.
+    let border_style = resolve_sides(&fixed, parent_border_style, Some(kt::BorderStyle::None), |s| {
         s.map(|s| match s.dash {
             Some(_) => kt::BorderStyle::Dashed,
             None => kt::BorderStyle::Solid,

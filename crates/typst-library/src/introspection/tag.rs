@@ -90,10 +90,10 @@ pub enum CellTagKind {
 impl CellTagMeta {
     /// Create metadata for a table cell.
     pub fn table(
-        x: usize,
-        y: usize,
-        colspan: std::num::NonZeroUsize,
-        rowspan: std::num::NonZeroUsize,
+        x: u32,
+        y: u32,
+        colspan: std::num::NonZeroU32,
+        rowspan: std::num::NonZeroU32,
         kind: Smart<TableCellKind>,
         is_repeated: bool,
     ) -> Self {
@@ -114,27 +114,27 @@ impl CellTagMeta {
             }
         };
         Self {
-            x: x.min(u16::MAX as usize) as u16,
-            y: y.min(u32::MAX as usize) as u32,
-            colspan: colspan.get().min(u16::MAX as usize) as u16,
-            rowspan: rowspan.get().min(u16::MAX as usize) as u16,
+            x: x.min(u16::MAX as u32) as u16,
+            y,
+            colspan: colspan.get().min(u16::MAX as u32) as u16,
+            rowspan: rowspan.get().min(u16::MAX as u32) as u16,
             kind: cell_kind,
         }
     }
 
     /// Create metadata for a grid cell.
     pub fn grid(
-        x: usize,
-        y: usize,
-        colspan: std::num::NonZeroUsize,
-        rowspan: std::num::NonZeroUsize,
+        x: u32,
+        y: u32,
+        colspan: std::num::NonZeroU32,
+        rowspan: std::num::NonZeroU32,
         is_repeated: bool,
     ) -> Self {
         Self {
-            x: x.min(u16::MAX as usize) as u16,
-            y: y.min(u32::MAX as usize) as u32,
-            colspan: colspan.get().min(u16::MAX as usize) as u16,
-            rowspan: rowspan.get().min(u16::MAX as usize) as u16,
+            x: x.min(u16::MAX as u32) as u16,
+            y,
+            colspan: colspan.get().min(u16::MAX as u32) as u16,
+            rowspan: rowspan.get().min(u16::MAX as u32) as u16,
             kind: if is_repeated { CellTagKind::Repeated } else { CellTagKind::GridCell },
         }
     }

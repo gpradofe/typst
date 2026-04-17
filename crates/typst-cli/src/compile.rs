@@ -316,6 +316,10 @@ fn compile_and_export(
     match config.output_format {
         OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg => {
             let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
+            // Free cached file data (source text, JSON bytes, etc.) after
+            // compilation. PDF export doesn't need the world's file store.
+            // Saves ~37 MB for documents with large data files.
+            world.clear_file_data();
             let result = output.and_then(|document| export_paged(document, config));
             Warned { output: result, warnings }
         }
@@ -378,34 +382,40 @@ fn export_paged(
 fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResult<()> {
     let options = pdf_options(config);
 
-    // Strip TableElem Content from the introspector to free ~400 MB.
-    // The Content tree is kept alive by Tag::Start references in the
-    // introspector. Pages were already flushed to disk (DiskPageStore),
-    // so the introspector is the last holder. PDF export only queries
-    // HeadingElem and AttachElem — never TableElem.
-    document
-        .strip_introspector_content(|c| c.is::<typst::model::TableElem>());
+    // Strip ALL heavy Content from the introspector except what PDF export
+    // actually queries. PDF export only queries HeadingElem (outline, named
+    // destinations) and AttachElem (file attachments). Everything else —
+    // TableElem, ParElem, StrongElem, EmphElem, GridElem, etc. — is never
+    // queried and keeps the Content tree alive via Arc refcounts.
+    // For a 100K-row table: ~500K ParElem entries alone keep ~72 MB alive.
+    document.strip_introspector_content(|c| {
+        !c.is::<typst::model::HeadingElem>() && !c.is::<typst::pdf::AttachElem>()
+    });
 
     let has_store = document.page_store().is_some();
-    let buffer = if has_store {
+    if has_store {
         // Large document: pages were flushed to disk during layout.
-        // Use streaming PDF conversion — reads pages one at a time.
+        // Use streaming PDF conversion — writes directly to file,
+        // avoiding a ~257 MB in-memory PDF buffer.
         let mut store_arc = document.take_page_store().unwrap();
         comemo::evict(0);
-        // Unwrap Arc for mutable access. Succeeds because take_page_store
-        // removed the document's reference, leaving refcount == 1.
         let store = std::sync::Arc::get_mut(&mut store_arc)
             .expect("DiskPageStore should have single owner after take");
-        typst_pdf::pdf_streaming(&mut document, &options, store)?
+        typst::engine_flags::compact_heap_and_trim_ws_full();
+        let writer = config
+            .output
+            .open()
+            .map_err(|err| eco_format!("failed to open output file ({err})"))
+            .at(Span::detached())?;
+        typst_pdf::pdf_streaming_to_writer(&mut document, &options, store, writer)?;
     } else {
-        typst_pdf::pdf(document, &options)?
+        let buffer = typst_pdf::pdf(document, &options)?;
+        config
+            .output
+            .write(&buffer)
+            .map_err(|err| eco_format!("failed to write PDF file ({err})"))
+            .at(Span::detached())?;
     };
-
-    config
-        .output
-        .write(&buffer)
-        .map_err(|err| eco_format!("failed to write PDF file ({err})"))
-        .at(Span::detached())?;
     Ok(())
 }
 

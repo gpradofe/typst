@@ -69,6 +69,12 @@ thread_local! {
     static INSET_CACHE: RefCell<FxHashMap<u128, Arc<Sides<Option<Rel<Length>>>>>> =
         RefCell::new(FxHashMap::default());
 
+    /// Cache for full stroke Sides, keyed by value hash.
+    /// Deduplicates identical stroke patterns across cells, saving 24 bytes/cell
+    /// (32 bytes inline → 8 bytes Arc). For 1M cells this saves ~24 MB.
+    #[allow(clippy::type_complexity)]
+    static FULL_STROKE_CACHE: RefCell<FxHashMap<u128, Arc<Sides<Option<Arc<Stroke<Abs>>>>>>> =
+        RefCell::new(FxHashMap::default());
 }
 
 /// Global CellGrid cache, shared across all threads. Uses Mutex so
@@ -98,6 +104,20 @@ pub fn has_large_cellgrid(threshold: usize) -> bool {
     cache.values().any(|grid| grid.entries.len() >= threshold)
 }
 
+/// Returns the entry count for a cached CellGrid by key.
+/// Returns 0 if the key is not in the cache.
+pub fn cellgrid_entry_count(key: u128) -> usize {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.get(&key).map_or(0, |grid| grid.entries.len())
+}
+
+/// Returns the total number of entries across all cached cellgrids.
+/// Available after realization (when grids are populated) and before layout.
+pub fn total_cellgrid_entries() -> usize {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.values().map(|grid| grid.entries.len()).sum()
+}
+
 /// Look up or compute a CellGrid for a table element.
 /// Returns (grid, cache_key) so the key can be stored on the element
 /// for later lookup in layout_table (where materialize has changed the
@@ -118,6 +138,23 @@ pub fn cached_table_cellgrid(
         }
     }
     let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    // Track cumulative entries during realization so layout_pages_streaming
+    // can decide the layout strategy before the grid layouter runs.
+    crate::engine_flags::add_grid_entries(grid.entries.len());
+    // Evict comemo closure caches after cell resolution for large tables.
+    // For multi-table documents with many small tables (< 15K accumulated),
+    // skip eviction entirely to avoid repeated HeapCompact calls — each
+    // costs a few ms and thousands of small tables add up to many seconds.
+    if crate::engine_flags::is_layout_eviction_enabled() {
+        if grid.entries.len() >= 50_000 {
+            comemo::evict(0);
+            crate::engine_flags::compact_heap_and_trim_ws_full();
+        } else if total_cellgrid_entries() >= 15_000 {
+            // Mid-size: evict caches but skip expensive heap compaction.
+            // The next realization will free old memory naturally.
+            comemo::evict(0);
+        }
+    }
     let mut cache = cellgrid_cache().lock().unwrap();
     if cache.len() >= MAX_CELLGRID_CACHE {
         cache.clear();
@@ -137,11 +174,34 @@ pub fn cellgrid_by_key(
     {
         let cache = cellgrid_cache().lock().unwrap();
         if let Some(grid) = cache.get(&key) {
-            return Ok(grid.clone());
+            let grid = grid.clone();
+            drop(cache);
+            // Evict comemo on cache hit too — during layout, CellGrids are
+            // cached from synthesize, so eviction only on cache miss would
+            // never trigger. Between tables, closure caches and shaping
+            // accumulate; evict them here. For small tables, skip the
+            // expensive HeapCompact/WS trim since it runs per-table.
+            if crate::engine_flags::is_layout_eviction_enabled() {
+                if grid.entries.len() >= 50_000 {
+                    comemo::evict(0);
+                    crate::engine_flags::compact_heap_and_trim_ws_full();
+                } else if total_cellgrid_entries() >= 15_000 {
+                    comemo::evict(0);
+                }
+            }
+            return Ok(grid);
         }
     }
     // Key evicted or never stored — recompute.
     let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    if crate::engine_flags::is_layout_eviction_enabled() {
+        if grid.entries.len() >= 50_000 {
+            comemo::evict(0);
+            crate::engine_flags::compact_heap_and_trim_ws_full();
+        } else if total_cellgrid_entries() >= 15_000 {
+            comemo::evict(0);
+        }
+    }
     let mut cache = cellgrid_cache().lock().unwrap();
     if cache.len() >= MAX_CELLGRID_CACHE {
         cache.clear();
@@ -391,7 +451,18 @@ impl ResolvableCell for Packed<TableCell> {
         // In the end, we flatten because, for layout purposes, an unspecified
         // cell stroke is the same as specifying 'none', so we equate the two
         // concepts.
-        let stroke = cell_stroke.fold(stroke).map(Option::flatten);
+        let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
+        // Arc-share identical stroke patterns via hash cache.
+        let stroke_hash = typst_utils::hash128(&(
+            &stroke_sides.top, &stroke_sides.right,
+            &stroke_sides.bottom, &stroke_sides.left,
+        ));
+        let stroke = FULL_STROKE_CACHE.with(|cache| {
+            cache.borrow_mut()
+                .entry(stroke_hash)
+                .or_insert_with(|| Arc::new(stroke_sides))
+                .clone()
+        });
 
         let resolved_align = match align {
             Smart::Custom(align) => Smart::Custom(
@@ -404,21 +475,6 @@ impl ResolvableCell for Packed<TableCell> {
         };
         let computed_inset =
             self.inset.get(styles).map_or(inset, |inner| inner.fold(inset));
-        let converted_stroke = stroke.as_ref().map(|side| {
-            Some(side.as_ref().map(|cell_stroke| {
-                let hash = typst_utils::hash128(&**cell_stroke);
-                STROKE_CONV_CACHE.with(|cache| {
-                    cache
-                        .borrow_mut()
-                        .entry(hash)
-                        .or_insert_with(|| {
-                            Arc::new((**cell_stroke).clone().map(Length::from))
-                        })
-                        .clone()
-                })
-            }))
-        });
-
         // CONSTRUCT phase: if no user show rules target table.cell, skip
         // the Packed<TableCell> allocation entirely. Inset/align will be
         // applied on-the-fly in layout_cell, keeping cell.body lightweight.
@@ -426,6 +482,21 @@ impl ResolvableCell for Packed<TableCell> {
         let (body, apply_inset_align, cell_resolved_inset) =
             if needs_packed_cell(styles, Element::of::<TableCell>()) {
                 // User show rules exist: keep Packed wrapper for matching.
+                // Clone the Arc'd stroke Sides for the converted_stroke.
+                let converted_stroke = (*stroke).clone().map(|side| {
+                    Some(side.as_ref().map(|cell_stroke| {
+                        let hash = typst_utils::hash128(&**cell_stroke);
+                        STROKE_CONV_CACHE.with(|cache| {
+                            cache
+                                .borrow_mut()
+                                .entry(hash)
+                                .or_insert_with(|| {
+                                    Arc::new((**cell_stroke).clone().map(Length::from))
+                                })
+                                .clone()
+                        })
+                    }))
+                });
                 let body = self.body.clone();
                 let new_cell = TableCell::new(body)
                     .with_x(Smart::Custom(x))
@@ -457,16 +528,16 @@ impl ResolvableCell for Packed<TableCell> {
 
         Cell {
             body,
-            fill,
-            colspan,
-            rowspan,
+            fill: fill.map(Box::new),
+            colspan: NonZeroU32::try_from(colspan).unwrap_or(NonZeroU32::MIN),
+            rowspan: NonZeroU32::try_from(rowspan).unwrap_or(NonZeroU32::MIN),
             stroke,
             stroke_overridden,
             breakable,
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
-            source: Some(CellSource::Table { cell_x: x, cell_y: y, kind }),
+            source: Some(CellSource::Table { cell_x: x as u32, cell_y: y as u32, kind }),
             source_span,
         }
     }
@@ -524,7 +595,18 @@ impl ResolvableCell for Packed<GridCell> {
         // In the end, we flatten because, for layout purposes, an unspecified
         // cell stroke is the same as specifying 'none', so we equate the two
         // concepts.
-        let stroke = cell_stroke.fold(stroke).map(Option::flatten);
+        let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
+        // Arc-share identical stroke patterns via hash cache.
+        let stroke_hash = typst_utils::hash128(&(
+            &stroke_sides.top, &stroke_sides.right,
+            &stroke_sides.bottom, &stroke_sides.left,
+        ));
+        let stroke = FULL_STROKE_CACHE.with(|cache| {
+            cache.borrow_mut()
+                .entry(stroke_hash)
+                .or_insert_with(|| Arc::new(stroke_sides))
+                .clone()
+        });
 
         let resolved_align = match align {
             Smart::Custom(align) => Smart::Custom(
@@ -537,23 +619,6 @@ impl ResolvableCell for Packed<GridCell> {
         };
         let computed_inset =
             self.inset.get(styles).map_or(inset, |inner| inner.fold(inset));
-        // Here we convert the resolved stroke to a regular stroke, however
-        // with resolved units (that is, 'em' converted to absolute units).
-        let converted_stroke = stroke.as_ref().map(|side| {
-            Some(side.as_ref().map(|cell_stroke| {
-                let hash = typst_utils::hash128(&**cell_stroke);
-                STROKE_CONV_CACHE.with(|cache| {
-                    cache
-                        .borrow_mut()
-                        .entry(hash)
-                        .or_insert_with(|| {
-                            Arc::new((**cell_stroke).clone().map(Length::from))
-                        })
-                        .clone()
-                })
-            }))
-        });
-
         // CONSTRUCT phase: if no user show rules target grid.cell, skip
         // the Packed<GridCell> allocation entirely. Inset/align will be
         // applied on-the-fly in layout_cell, keeping cell.body lightweight.
@@ -561,6 +626,21 @@ impl ResolvableCell for Packed<GridCell> {
         let (body, apply_inset_align, cell_resolved_inset) =
             if needs_packed_cell(styles, Element::of::<GridCell>()) {
                 // User show rules exist: keep Packed wrapper for matching.
+                // Clone the Arc'd stroke Sides for the converted_stroke.
+                let converted_stroke = (*stroke).clone().map(|side| {
+                    Some(side.as_ref().map(|cell_stroke| {
+                        let hash = typst_utils::hash128(&**cell_stroke);
+                        STROKE_CONV_CACHE.with(|cache| {
+                            cache
+                                .borrow_mut()
+                                .entry(hash)
+                                .or_insert_with(|| {
+                                    Arc::new((**cell_stroke).clone().map(Length::from))
+                                })
+                                .clone()
+                        })
+                    }))
+                });
                 let body = self.body.clone();
                 let new_cell = GridCell::new(body)
                     .with_x(Smart::Custom(x))
@@ -591,16 +671,16 @@ impl ResolvableCell for Packed<GridCell> {
 
         Cell {
             body,
-            fill,
-            colspan,
-            rowspan,
+            fill: fill.map(Box::new),
+            colspan: NonZeroU32::try_from(colspan).unwrap_or(NonZeroU32::MIN),
+            rowspan: NonZeroU32::try_from(rowspan).unwrap_or(NonZeroU32::MIN),
             stroke,
             stroke_overridden,
             breakable,
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
-            source: Some(CellSource::Grid { cell_x: x, cell_y: y }),
+            source: Some(CellSource::Grid { cell_x: x as u32, cell_y: y as u32 }),
             source_span,
         }
     }
@@ -806,21 +886,21 @@ pub enum ResolvableGridItem<T: ResolvableCell> {
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub enum CellSource {
     /// The cell came from a table element. Stores resolved properties needed
-    /// for PDF tagging (x, y, kind).
+    /// for PDF tagging (x, y, kind). Uses u32 to save 8 bytes per cell.
     Table {
         /// The cell's column index.
-        cell_x: usize,
+        cell_x: u32,
         /// The cell's row index.
-        cell_y: usize,
+        cell_y: u32,
         /// The cell's kind (header/footer/data) for PDF accessibility.
         kind: Smart<TableCellKind>,
     },
     /// The cell came from a grid element. Stores resolved position for tags.
     Grid {
         /// The cell's column index.
-        cell_x: usize,
+        cell_x: u32,
         /// The cell's row index.
-        cell_y: usize,
+        cell_y: u32,
     },
 }
 
@@ -831,17 +911,21 @@ pub struct Cell {
     /// `Packed<GridCell>` for show rule support. The resolved fields below
     /// are used by layout_cell for lightweight tag generation.
     pub body: Content,
-    /// The cell's fill.
-    pub fill: Option<Paint>,
-    /// The amount of columns spanned by the cell.
-    pub colspan: NonZeroUsize,
-    /// The amount of rows spanned by the cell.
-    pub rowspan: NonZeroUsize,
+    /// The cell's fill. Boxed to save 16 bytes per cell (Option<Paint> is 24
+    /// bytes, Option<Box<Paint>> is 8 bytes). For 1M cells this saves ~16 MB.
+    pub fill: Option<Box<Paint>>,
+    /// The amount of columns spanned by the cell. Uses u32 instead of usize
+    /// to save 4 bytes per cell (~4 MB for 1M cells). Max colspan is well
+    /// under 2^32.
+    pub colspan: NonZeroU32,
+    /// The amount of rows spanned by the cell. Uses u32 for same reason.
+    pub rowspan: NonZeroU32,
     /// The cell's stroke.
     ///
-    /// We use an Arc to avoid unnecessary space usage when all sides are the
-    /// same, or when the strokes come from a common source.
-    pub stroke: Sides<Option<Arc<Stroke<Abs>>>>,
+    /// Arc-shared across cells with the same stroke pattern to save 24 bytes
+    /// per cell (32 bytes inline → 8 bytes Arc). For 1M cells: ~24 MB savings.
+    /// Individual sides also use Arc to deduplicate identical strokes.
+    pub stroke: Arc<Sides<Option<Arc<Stroke<Abs>>>>>,
     /// Which stroke sides were explicitly overridden by the cell, over the
     /// grid's global stroke setting.
     ///
@@ -871,15 +955,20 @@ pub struct Cell {
     pub source_span: Span,
 }
 
+const _: () = {
+    assert!(std::mem::size_of::<Cell>() <= 96);
+    assert!(std::mem::size_of::<Entry>() <= 96);
+};
+
 impl Cell {
     /// Create a simple cell given its body.
     pub fn new(body: Content) -> Self {
         Self {
             body,
             fill: None,
-            colspan: NonZeroUsize::ONE,
-            rowspan: NonZeroUsize::ONE,
-            stroke: Sides::splat(None),
+            colspan: NonZeroU32::ONE,
+            rowspan: NonZeroU32::ONE,
+            stroke: Arc::new(Sides::splat(None)),
             stroke_overridden: Sides::splat(false),
             breakable: true,
             resolved_inset: None,
@@ -913,6 +1002,8 @@ pub enum Entry {
         /// The index of the cell this entry is merged with.
         parent: usize,
     },
+    /// An unfilled slot (used during grid resolution, replaced before layout).
+    Empty,
 }
 
 impl Entry {
@@ -920,8 +1011,13 @@ impl Entry {
     pub fn as_cell(&self) -> Option<&Cell> {
         match self {
             Self::Cell(cell) => Some(cell),
-            Self::Merged { .. } => None,
+            Self::Merged { .. } | Self::Empty => None,
         }
+    }
+
+    /// Returns true if this entry is an unfilled empty slot.
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
     }
 }
 
@@ -1124,6 +1220,7 @@ impl CellGrid {
                 let factor = if self.has_gutter { 2 } else { 1 };
                 Axes::new(factor * (*parent % c), factor * (*parent / c))
             }
+            Entry::Empty => unreachable!("empty entry after grid resolution"),
         })
     }
 
@@ -1175,14 +1272,16 @@ impl CellGrid {
     /// might span if the grid has gutters.
     #[inline]
     pub fn effective_colspan_of_cell(&self, cell: &Cell) -> usize {
-        if self.has_gutter { 2 * cell.colspan.get() - 1 } else { cell.colspan.get() }
+        let c = cell.colspan.get() as usize;
+        if self.has_gutter { 2 * c - 1 } else { c }
     }
 
     /// Returns the effective rowspan of a cell, considering the gutters it
     /// might span if the grid has gutters.
     #[inline]
     pub fn effective_rowspan_of_cell(&self, cell: &Cell) -> usize {
-        if self.has_gutter { 2 * cell.rowspan.get() - 1 } else { cell.rowspan.get() }
+        let r = cell.rowspan.get() as usize;
+        if self.has_gutter { 2 * r - 1 } else { r }
     }
 
     #[inline]
@@ -1322,7 +1421,7 @@ impl GridMeta {
                         .or_insert_with(|| {
                             let idx = unique_strokes.len() as u16;
                             unique_strokes.push(StrokePattern {
-                                stroke: cell.stroke.clone(),
+                                stroke: (*cell.stroke).clone(),
                                 stroke_overridden: cell.stroke_overridden,
                             });
                             idx
@@ -1330,7 +1429,7 @@ impl GridMeta {
 
                     MetaEntry::Cell(MetaCell {
                         stroke_idx,
-                        fill_rgb: cell.fill.as_ref().and_then(|paint| match paint {
+                        fill_rgb: cell.fill.as_deref().and_then(|paint| match paint {
                             Paint::Solid(color) => {
                                 let c = color.to_rgb();
                                 Some([
@@ -1346,6 +1445,7 @@ impl GridMeta {
                 Entry::Merged { parent } => {
                     MetaEntry::Merged { parent: *parent as u32 }
                 }
+                Entry::Empty => unreachable!("empty entry after grid resolution"),
             })
             .collect();
 
@@ -1430,6 +1530,7 @@ where
     // Clear caches to prevent cross-compilation leaks.
     STROKE_CONV_CACHE.with(|cache| cache.borrow_mut().clear());
     INSET_CACHE.with(|cache| cache.borrow_mut().clear());
+    FULL_STROKE_CACHE.with(|cache| cache.borrow_mut().clear());
 
     CellGridResolver {
         tracks,
@@ -1595,7 +1696,7 @@ impl CellGridResolver<'_, '_> {
         // TODO(subfooters): how to add a footer here while avoiding
         // unnecessary allocations?
         let mut header_rows: SmallBitSet = SmallBitSet::new();
-        let mut resolved_cells: Vec<Option<Entry>> = Vec::with_capacity(capacity);
+        let mut resolved_cells: Vec<Entry> = Vec::with_capacity(capacity);
 
         // For large grids, periodically evict comemo caches during cell
         // resolution. The fill/stroke/align/inset closure evaluations are
@@ -1682,7 +1783,7 @@ impl CellGridResolver<'_, '_> {
         footer: &mut Option<(usize, Span, Footer)>,
         repeat_footer: &mut bool,
         auto_index: &mut usize,
-        resolved_cells: &mut Vec<Option<Entry>>,
+        resolved_cells: &mut Vec<Entry>,
         at_least_one_cell: &mut bool,
         child: ResolvableGridChild<T, I>,
     ) -> SourceResult<()>
@@ -2022,7 +2123,7 @@ impl CellGridResolver<'_, '_> {
                 // (they can be overridden later); however, if no cells
                 // occupy them as we finish building the grid, then such
                 // positions will be replaced by empty cells.
-                resolved_cells.resize_with(new_len, || None);
+                resolved_cells.resize_with(new_len, || Entry::Empty);
             }
 
             // The vector is large enough to contain the cell, so we can
@@ -2030,7 +2131,7 @@ impl CellGridResolver<'_, '_> {
             // placed in. However, we still need to ensure we won't try to
             // place a cell where there already is one.
             let slot = &mut resolved_cells[resolved_index];
-            if slot.is_some() {
+            if !slot.is_empty() {
                 bail!(
                     cell_span,
                     "attempted to place a second cell at column {x}, row {y}";
@@ -2038,7 +2139,7 @@ impl CellGridResolver<'_, '_> {
                 );
             }
 
-            *slot = Some(Entry::Cell(cell));
+            *slot = Entry::Cell(cell);
 
             // Now, if the cell spans more than one row or column, we fill
             // the spanned positions in the grid with Entry::Merged
@@ -2054,7 +2155,7 @@ impl CellGridResolver<'_, '_> {
                         // This is the parent cell.
                         continue;
                     }
-                    if slot.is_some() {
+                    if !slot.is_empty() {
                         bail!(
                             cell_span,
                             "cell would span a previously placed cell at column \
@@ -2063,7 +2164,7 @@ impl CellGridResolver<'_, '_> {
                                    reducing the cell's rowspan or colspan";
                         )
                     }
-                    *slot = Some(Entry::Merged { parent: resolved_index });
+                    *slot = Entry::Merged { parent: resolved_index };
                 }
             }
         }
@@ -2083,7 +2184,7 @@ impl CellGridResolver<'_, '_> {
 
                     if resolved_cells.len() <= columns * group_start {
                         // Ensure the automatically chosen row actually exists.
-                        resolved_cells.resize_with(columns * (group_start + 1), || None);
+                        resolved_cells.resize_with(columns * (group_start + 1), || Entry::Empty);
                     }
 
                     // Even though this header or footer is fully empty, we add one
@@ -2094,7 +2195,7 @@ impl CellGridResolver<'_, '_> {
                     // 'find_next_empty_row' will skip through any existing headers
                     // and footers without having to loop through them each time.
                     // Cells themselves, unfortunately, still have to.
-                    assert!(resolved_cells[*local_auto_index].is_none());
+                    assert!(resolved_cells[*local_auto_index].is_empty());
                     let kind = match row_group.kind {
                         RowGroupKind::Header => TableCellKind::Header(
                             NonZeroU32::ONE,
@@ -2103,13 +2204,13 @@ impl CellGridResolver<'_, '_> {
                         RowGroupKind::Footer => TableCellKind::Footer,
                     };
                     resolved_cells[*local_auto_index] =
-                        Some(Entry::Cell(self.resolve_cell(
+                        Entry::Cell(self.resolve_cell(
                             T::default(),
                             0,
                             first_available_row,
                             1,
                             Smart::Custom(kind),
-                        )?));
+                        )?);
 
                     group_start..group_end
                 }
@@ -2188,7 +2289,7 @@ impl CellGridResolver<'_, '_> {
     /// Fixup phase (final step in cell grid generation):
     ///
     /// 1. Replace absent entries by resolved empty cells, producing a vector
-    ///    of `Entry` from `Option<Entry>`.
+    ///    replacing `Entry::Empty` slots with resolved default cells.
     ///
     /// 2. Add enough empty cells to the end of the grid such that it has at
     ///    least the given amount of rows (must be a multiple of `columns`,
@@ -2199,7 +2300,7 @@ impl CellGridResolver<'_, '_> {
     ///    can be affected by show rules and grid-wide styling.
     fn fixup_cells<T>(
         &mut self,
-        resolved_cells: Vec<Option<Entry>>,
+        mut resolved_cells: Vec<Entry>,
         columns: usize,
     ) -> SourceResult<Vec<Entry>>
     where
@@ -2208,29 +2309,27 @@ impl CellGridResolver<'_, '_> {
         let Some(expected_total_cells) = columns.checked_mul(self.tracks.y.len()) else {
             bail!(self.span, "too many rows were specified");
         };
-        let missing_cells = expected_total_cells.saturating_sub(resolved_cells.len());
+        // Extend to expected size with empty entries (never shrink).
+        let target = expected_total_cells.max(resolved_cells.len());
+        resolved_cells.resize_with(target, || Entry::Empty);
 
-        resolved_cells
-            .into_iter()
-            .chain(std::iter::repeat_with(|| None).take(missing_cells))
-            .enumerate()
-            .map(|(i, cell)| {
-                if let Some(cell) = cell {
-                    Ok(cell)
-                } else {
-                    let x = i % columns;
-                    let y = i / columns;
+        // Replace empty entries in-place with resolved default cells.
+        // This avoids allocating a second Vec<Entry> (~151 MB for 300K cells).
+        for i in 0..resolved_cells.len() {
+            if resolved_cells[i].is_empty() {
+                let x = i % columns;
+                let y = i / columns;
+                resolved_cells[i] = Entry::Cell(self.resolve_cell(
+                    T::default(),
+                    x,
+                    y,
+                    1,
+                    Smart::Auto,
+                )?);
+            }
+        }
 
-                    Ok(Entry::Cell(self.resolve_cell(
-                        T::default(),
-                        x,
-                        y,
-                        1,
-                        Smart::Auto,
-                    )?))
-                }
-            })
-            .collect::<SourceResult<Vec<Entry>>>()
+        Ok(resolved_cells)
     }
 
     /// Takes the list of pending lines and evaluates a final list of hlines
@@ -2530,7 +2629,7 @@ impl CellGridResolver<'_, '_> {
 /// returned. Otherwise, the new `start..end` range of rows in the row group is
 /// returned.
 fn expand_row_group(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     group_range: Option<&Range<usize>>,
     group_kind: RowGroupKind,
     first_available_row: usize,
@@ -2620,7 +2719,7 @@ fn expand_row_group(
             .get(new_y * columns..)
             .map(|cells| &cells[..columns.min(cells.len())])
         {
-            if new_row.iter().any(Option::is_some) {
+            if new_row.iter().any(|e| !e.is_empty()) {
                 bail!(
                     "cell would cause {} to expand to non-empty row {new_y}",
                     group_kind.name();
@@ -2700,7 +2799,7 @@ fn resolve_cell_position(
     header_rows: &SmallBitSet,
     headers: &[Repeatable<Header>],
     footer: Option<&(usize, Span, Footer)>,
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: &mut usize,
     first_available_row: usize,
     columns: usize,
@@ -2826,7 +2925,7 @@ fn resolve_cell_position(
                     // in which case we can just expand the vector enough to
                     // place this cell. In either case, we found an available
                     // position.
-                    !matches!(resolved_cells.get(*possible_index), Some(Some(_)))
+                    matches!(resolved_cells.get(*possible_index), None | Some(Entry::Empty))
                 })
                 .ok_or_else(|| {
                     eco_format!(
@@ -2848,7 +2947,7 @@ fn resolve_cell_position(
 fn find_next_available_position(
     header_rows: &SmallBitSet,
     footer: Option<&(usize, Span, Footer)>,
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     columns: usize,
     initial_index: usize,
     skip_rows: bool,
@@ -2856,7 +2955,7 @@ fn find_next_available_position(
     let mut resolved_index = initial_index;
 
     loop {
-        if let Some(Some(_)) = resolved_cells.get(resolved_index) {
+        if matches!(resolved_cells.get(resolved_index), Some(e) if !e.is_empty()) {
             // Skip any non-absent cell positions (`Some(None)`) to
             // determine where this cell will be placed. An out of
             // bounds position (thus `None`) is also a valid new
@@ -2910,14 +3009,14 @@ fn find_next_available_position(
 /// an initial index for search, since we know that there are no empty rows
 /// before automatically-positioned cells, as they are placed sequentially.
 fn find_next_empty_row(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: usize,
     columns: usize,
 ) -> usize {
     let mut resolved_index = auto_index.next_multiple_of(columns);
     while resolved_cells
         .get(resolved_index..resolved_index + columns)
-        .is_some_and(|row| row.iter().any(Option::is_some))
+        .is_some_and(|row| row.iter().any(|e| !e.is_empty()))
     {
         // Skip non-empty rows.
         resolved_index += columns;
@@ -2934,7 +3033,7 @@ fn find_next_empty_row(
 /// Otherwise, the hline would just be placed under the first row of those
 /// rowspans and disappear (except at the presence of column gutter).
 fn skip_auto_index_through_fully_merged_rows(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: &mut usize,
     columns: usize,
 ) {
@@ -2946,10 +3045,11 @@ fn skip_auto_index_through_fully_merged_rows(
         while resolved_cells
             .get(*auto_index..*auto_index + columns)
             .is_some_and(|row| {
-                row.iter().all(|entry| matches!(entry, Some(Entry::Merged { .. })))
+                row.iter().all(|entry| matches!(entry, Entry::Merged { .. }))
             })
         {
             *auto_index += columns;
         }
     }
 }
+

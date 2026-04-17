@@ -134,6 +134,9 @@ pub fn convert_streaming(
     );
 
     // Build tags — either from in-memory pages or from disk store.
+    // init_from_store now clears Content from the tag registry internally
+    // (after page iteration, before context::finish), so the Content tree
+    // is freed before the expensive tag tree building phase.
     let tags = if typst_document.pages().is_empty() {
         // Pages were already flushed to disk (Phase 1 flushing).
         // Read them from the store one at a time.
@@ -143,13 +146,6 @@ pub fn convert_streaming(
         typst_document.drop_pages();
         tags
     };
-
-    // Free Content objects from the tag registry. The Content tree for
-    // a 100K-row table is ~912 MB — kept alive by the table element's
-    // Content in converter.tags. After init_from_store has extracted all
-    // needed metadata into the Groups tree, Content is never accessed
-    // again. Clearing it frees the entire Content tree.
-    store.clear_tag_content();
 
     let mut gc = GlobalContext::new(
         typst_document,
@@ -167,12 +163,22 @@ pub fn convert_streaming(
     // stepping (step_end_tag). Saves ~69 MB before build_table peak.
     tags::clear_locations(&mut gc.tags);
 
+    // Shrink ThinVec children to exact size — frees excess capacity (~47 MB)
+    // before context::finish creates temporary StrokeGrid (~70 MB).
+    tags::shrink_children(&mut gc.tags);
+
     attach_files(&gc, &mut document)?;
 
-    // Evict comemo caches accumulated during page conversion. Text shaping
-    // and font handling are memoized, but won't be called again — tag
-    // resolution doesn't do text shaping.
+    // Evict comemo caches accumulated during page conversion.
+    // Adaptive trim: only do full WS trim for large documents (>= 200K
+    // cumulative grid entries). For smaller docs, HeapCompact suffices
+    // and avoids the ~500ms page-fault penalty.
     comemo::evict(0);
+    if typst_library::engine_flags::cumulative_grid_entries() >= 200_000 {
+        typst_library::engine_flags::compact_heap_and_trim_ws_full();
+    } else {
+        typst_library::engine_flags::compact_heap_and_trim_ws();
+    }
 
     let (doc_lang, tree) = tags::resolve(&mut gc, &mut document)?;
 
@@ -181,6 +187,110 @@ pub fn convert_streaming(
     document.set_tag_tree(tree);
 
     finish(document, gc, options.standards.config)
+}
+
+/// Streaming conversion that writes PDF directly to a writer (no in-memory buffer).
+pub fn convert_streaming_to_writer<W: std::io::Write>(
+    typst_document: &mut PagedDocument,
+    options: &PdfOptions,
+    store: &mut typst_layout::page_store::DiskPageStore,
+    writer: W,
+) -> SourceResult<()> {
+    let settings = SerializeSettings {
+        compress_content_streams: true,
+        no_device_cs: true,
+        ascii_compatible: false,
+        xmp_metadata: true,
+        cmyk_profile: None,
+        configuration: options.standards.config,
+        enable_tagging: options.tagged,
+        render_svg_glyph_fn: render_svg_glyph,
+    };
+
+    let mut document = Document::new_with(settings);
+    let page_count = if typst_document.pages().is_empty() {
+        store.page_count()
+    } else {
+        typst_document.pages().len()
+    };
+    let page_index_converter = PageIndexConverter::with_page_count(page_count, options);
+    let named_destinations = collect_named_destinations(
+        &mut document,
+        typst_document,
+        &[],
+        &page_index_converter,
+    );
+
+    let tags = if typst_document.pages().is_empty() {
+        tags::init_from_store(typst_document, options, store)?
+    } else {
+        let tags = tags::init(typst_document, options)?;
+        typst_document.drop_pages();
+        tags
+    };
+
+    let mut gc = GlobalContext::new(
+        typst_document,
+        options,
+        None,
+        named_destinations,
+        page_index_converter,
+        tags,
+    );
+
+    convert_pages_from_store(&mut gc, &mut document, store)?;
+    tags::clear_locations(&mut gc.tags);
+    tags::shrink_children(&mut gc.tags);
+    attach_files(&gc, &mut document)?;
+    // Adaptive trim at this boundary between page conversion and tag
+    // resolution. For large documents (>= 200K cumulative grid entries),
+    // full WS trim prevents swap during tag flattening. For smaller docs,
+    // HeapCompact saves ~500ms of page-fault cost.
+    comemo::evict(0);
+    if typst_library::engine_flags::cumulative_grid_entries() >= 200_000 {
+        typst_library::engine_flags::compact_heap_and_trim_ws_full();
+    } else {
+        typst_library::engine_flags::compact_heap_and_trim_ws();
+    }
+
+    let (doc_lang, tree) = tags::resolve(&mut gc, &mut document)?;
+
+    document.set_outline(build_outline(&gc));
+    document.set_metadata(build_metadata(&gc, doc_lang));
+    document.set_tag_tree(tree);
+
+    // Drop GlobalContext before document finalization. It holds the entire
+    // tag tree context, font caches, and image maps — all no longer needed.
+    // Freeing here reduces peak memory during krilla's serialize_pages +
+    // serialize_tag_tree phase.
+    let config = options.standards.config;
+    drop(gc);
+    comemo::evict(0);
+    // Keep full WS trim here — this is the final major boundary before
+    // krilla's finish_to_writer, which allocates heavily during PDF
+    // serialization. Releasing RSS here materially reduces peak.
+    typst_library::engine_flags::compact_heap_and_trim_ws_full();
+
+    let validator = config.validator();
+    match document.finish_to_writer(writer) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            Err(match e {
+                krilla::error::KrillaError::Io(message) => {
+                    ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
+                        typst_syntax::Span::detached(),
+                        ecow::eco_format!("failed to write PDF: {message}"),
+                    )]
+                }
+                _ => {
+                    ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
+                        typst_syntax::Span::detached(),
+                        ecow::eco_format!("PDF export error: {e:?}"),
+                    )]
+                }
+            })
+        }
+    }
 }
 
 /// Reads pages one at a time from disk and converts them to PDF.
@@ -556,6 +666,22 @@ pub(crate) fn handle_group(
     Ok(())
 }
 
+/// Finish a krilla document by streaming to a writer (no in-memory PDF buffer).
+#[typst_macros::time(name = "finish export streaming")]
+fn finish_to_writer<W: std::io::Write>(
+    document: Document,
+    gc: GlobalContext,
+    configuration: Configuration,
+    writer: W,
+) -> SourceResult<()> {
+    let validator = configuration.validator();
+
+    match document.finish_to_writer(writer) {
+        Ok(()) => Ok(()),
+        Err(e) => handle_krilla_error(e, &gc, validator, configuration),
+    }
+}
+
 /// Finish a krilla document and handle export errors.
 #[typst_macros::time(name = "finish export")]
 fn finish(
@@ -567,72 +693,84 @@ fn finish(
 
     match document.finish() {
         Ok(r) => Ok(r),
-        Err(e) => match e {
-            KrillaError::Font(f, err) => {
-                bail!(
-                    Span::detached(),
-                    "failed to process {} ({err})",
-                    display_font(gc.fonts_backward.get(&f));
-                    hint: "make sure the font is valid";
-                    hint: "the used font might be unsupported by Typst";
-                );
-            }
-            KrillaError::Validation(ve) => {
-                let errors = ve
-                    .iter()
-                    .map(|e| convert_error(&gc, validator, e))
-                    .collect::<EcoVec<_>>();
-                Err(errors)
-            }
-            KrillaError::Image(_, loc, err) => {
-                let span = to_span(loc);
-                bail!(span, "failed to process image ({err})");
-            }
-            KrillaError::SixteenBitImage(image, _) => {
-                let span = gc.image_to_spans.get(&image).unwrap();
-                bail!(
-                    *span, "16 bit images are not supported in this export mode";
-                    hint: "convert the image to 8 bit instead";
-                )
-            }
-            KrillaError::Pdf(_, e, loc) => {
-                let span = to_span(loc);
-                match e {
-                    // We already validated in `typst-library` that the page index is valid.
-                    PdfError::InvalidPage(_) => bail!(
-                        span,
-                        "invalid page number for PDF file";
-                        hint: "please report this as a bug";
-                    ),
-                    PdfError::VersionMismatch(v) => {
-                        let pdf_ver = v.as_str();
-                        let config_ver = configuration.version();
-                        let cur_ver = config_ver.as_str();
-                        bail!(span,
-                            "the version of the PDF is too high";
-                            hint: "the current export target is {cur_ver}, while the PDF \
-                                   has version {pdf_ver}";
-                            hint: "raise the export target to {pdf_ver} or higher";
-                            hint: "or preprocess the PDF to convert it to a lower version";
-                        );
-                    }
+        Err(e) => handle_krilla_error(e, &gc, validator, configuration),
+    }
+}
+
+/// Convert a KrillaError into a SourceResult.
+fn handle_krilla_error<T>(
+    e: KrillaError,
+    gc: &GlobalContext,
+    validator: Validator,
+    configuration: Configuration,
+) -> SourceResult<T> {
+    match e {
+        KrillaError::Font(f, err) => {
+            bail!(
+                Span::detached(),
+                "failed to process {} ({err})",
+                display_font(gc.fonts_backward.get(&f));
+                hint: "make sure the font is valid";
+                hint: "the used font might be unsupported by Typst";
+            );
+        }
+        KrillaError::Validation(ve) => {
+            let errors = ve
+                .iter()
+                .map(|e| convert_error(gc, validator, e))
+                .collect::<EcoVec<_>>();
+            Err(errors)
+        }
+        KrillaError::Image(_, loc, err) => {
+            let span = to_span(loc);
+            bail!(span, "failed to process image ({err})");
+        }
+        KrillaError::SixteenBitImage(image, _) => {
+            let span = gc.image_to_spans.get(&image).unwrap();
+            bail!(
+                *span, "16 bit images are not supported in this export mode";
+                hint: "convert the image to 8 bit instead";
+            )
+        }
+        KrillaError::Pdf(_, e, loc) => {
+            let span = to_span(loc);
+            match e {
+                PdfError::InvalidPage(_) => bail!(
+                    span,
+                    "invalid page number for PDF file";
+                    hint: "please report this as a bug";
+                ),
+                PdfError::VersionMismatch(v) => {
+                    let pdf_ver = v.as_str();
+                    let config_ver = configuration.version();
+                    let cur_ver = config_ver.as_str();
+                    bail!(span,
+                        "the version of the PDF is too high";
+                        hint: "the current export target is {cur_ver}, while the PDF \
+                               has version {pdf_ver}";
+                        hint: "raise the export target to {pdf_ver} or higher";
+                        hint: "or preprocess the PDF to convert it to a lower version";
+                    );
                 }
             }
-            KrillaError::DuplicateTagId(_, loc) => {
-                let span = to_span(loc);
-                bail!(span,
-                    "duplicate tag id";
-                    hint: "please report this as a bug";
-                );
-            }
-            KrillaError::UnknownTagId(_, loc) => {
-                let span = to_span(loc);
-                bail!(span,
-                    "unknown tag id";
-                    hint: "please report this as a bug";
-                );
-            }
-        },
+        }
+        KrillaError::DuplicateTagId(_, loc) => {
+            let span = to_span(loc);
+            bail!(span,
+                "duplicate tag id";
+                hint: "please report this as a bug";
+            );
+        }
+        KrillaError::UnknownTagId(_, loc) => {
+            let span = to_span(loc);
+            bail!(span,
+                "unknown tag id";
+                hint: "please report this as a bug";
+            );
+        }
+        KrillaError::Io(msg) => {
+            bail!(Span::detached(), "I/O error during PDF export: {msg}");
+        }
     }
 }
 

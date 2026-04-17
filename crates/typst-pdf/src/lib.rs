@@ -56,6 +56,20 @@ pub fn pdf_streaming(
     convert::convert_streaming(document, options, store)
 }
 
+/// Export a document to PDF with streaming output to a writer (no in-memory buffer).
+///
+/// Same as `pdf_streaming` but writes directly to a writer instead of
+/// returning a `Vec<u8>`, eliminating the ~257 MB in-memory PDF buffer.
+#[typst_macros::time(name = "pdf streaming to writer")]
+pub fn pdf_streaming_to_writer<W: std::io::Write>(
+    document: &mut PagedDocument,
+    options: &PdfOptions,
+    store: &mut typst_layout::page_store::DiskPageStore,
+    writer: W,
+) -> SourceResult<()> {
+    convert::convert_streaming_to_writer(document, options, store, writer)
+}
+
 /// Export a document into a PDF file as part of a bundle.
 ///
 /// Takes additional `anchor` locations that will be serialized as named

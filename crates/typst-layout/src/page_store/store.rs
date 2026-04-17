@@ -192,6 +192,77 @@ impl DiskPageStore {
         Ok(SequentialPageIterator { store: self, reader, index: 0 })
     }
 
+    /// Opens a sequential reader for raw page data.
+    /// The returned reader is an independent file handle that does not
+    /// borrow the store, allowing `&mut self` methods to be called
+    /// between reads.
+    pub fn open_sequential_reader(&self) -> io::Result<io::BufReader<std::fs::File>> {
+        Ok(io::BufReader::new(self.file.reopen()?))
+    }
+
+    /// Reads the next page from a sequential reader using consuming tag
+    /// reconstruction. Each tag's Content is taken out of the converter
+    /// via `Option::take()`, freeing the reference immediately instead
+    /// of keeping all Content alive for the entire page loop.
+    ///
+    /// `is_last` should be true for the last page so remaining tags are
+    /// injected.
+    pub fn read_next_page_consuming(
+        &mut self,
+        reader: &mut io::BufReader<std::fs::File>,
+        is_last: bool,
+    ) -> io::Result<Page> {
+        let mut len_bytes = [0u8; 8];
+        reader.read_exact(&mut len_bytes)?;
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf)?;
+
+        let spage: SPage = bincode::deserialize(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let mut page = self.reconstruct_page_consuming(spage);
+
+        // Inject remaining tags into the last page.
+        if is_last && !self.remaining_tags.is_empty() {
+            let pos = Point::with_y(page.frame.height());
+            page.frame.push_multiple(
+                self.remaining_tags
+                    .drain(..)
+                    .map(|tag| (pos, FrameItem::Tag(tag))),
+            );
+        }
+
+        Ok(page)
+    }
+
+    /// Reconstructs a page using consuming tag reconstruction.
+    fn reconstruct_page_consuming(&mut self, spage: SPage) -> Page {
+        let frame = self.converter.reconstruct_frame_consuming(spage.frame);
+
+        let fill = match spage.fill {
+            None => Smart::Auto,
+            Some(None) => Smart::Custom(None),
+            Some(Some(paint)) => {
+                Smart::Custom(Some(self.converter.reconstruct_paint(paint)))
+            }
+        };
+
+        let numbering =
+            spage.numbering_ref.map(|id| self.numberings[id as usize].clone());
+
+        let supplement = self.supplements[spage.supplement_ref as usize].clone();
+
+        Page {
+            frame,
+            fill,
+            numbering,
+            supplement,
+            number: spage.number,
+        }
+    }
+
     // --- Conversion: Page → SPage (delegates frame conversion to FrameConverter) ---
 
     fn convert_page(&mut self, page: &Page) -> SPage {

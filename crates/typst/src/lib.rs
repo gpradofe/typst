@@ -147,13 +147,24 @@ fn compile_impl<T: Output>(
         let _scope = TimingScope::new(ITER_NAMES[history.len()]);
 
         // Enable layout-time eviction for memory management during layout.
-        // Only in iteration 1: subsequent iterations benefit from comemo
-        // cache hits for cell layouts. Eviction in iteration 2+ would
-        // destroy these caches and force full recomputation.
+        // In iteration 1: always enabled to bound peak memory.
+        // In iteration 2+: enabled for large-table documents (>= 50K cumulative
+        // grid entries) where comemo caches from 8+ tables accumulate to
+        // ~160 MB without eviction. For small documents, iteration 2 benefits
+        // from comemo cache hits so eviction is disabled.
         if history.is_empty() {
             typst_library::engine_flags::enable_layout_eviction();
         } else {
-            typst_library::engine_flags::disable_layout_eviction();
+            let total = typst_library::layout::grid::resolve::total_cellgrid_entries();
+            if total >= 50_000 {
+                // Large-table documents: enable eviction to bound peak.
+                // Comemo cache hits are minimal for multi-table documents
+                // (each table has unique content). For single-table documents,
+                // total < 50K threshold won't trigger this.
+                typst_library::engine_flags::enable_layout_eviction();
+            } else {
+                typst_library::engine_flags::disable_layout_eviction();
+            }
         }
         // Reset cumulative grid entry counter and table-level bypass
         // for each iteration. Table cache budget is reset separately
@@ -161,6 +172,15 @@ fn compile_impl<T: Output>(
         typst_library::engine_flags::reset_grid_entries();
         typst_library::engine_flags::disable_table_level_bypass();
         typst_library::engine_flags::reset_table_cache_budget();
+        // For iteration 2+, if iteration 1 detected large table data (either
+        // one huge table or many smaller ones), bypass layout_fragment_impl
+        // memoization to avoid rebuilding the ~168 MB constraint Vec.
+        if !history.is_empty() {
+            let total = typst_library::layout::grid::resolve::total_cellgrid_entries();
+            if total >= 50_000 {
+                typst_library::engine_flags::enable_table_level_bypass();
+            }
+        }
         typst_layout::reset_shared_output_store();
         let introspector = history
             .last()
@@ -188,13 +208,27 @@ fn compile_impl<T: Output>(
             // disabled and pages flushed to disk. This prevents holding the
             // full document in memory. Only activates for documents exceeding
             // the streaming threshold (>100 pages).
+            // Phase 2 streaming is effectively handled by the FLUSH_THRESHOLD
+            // during Phase 1, which already writes pages to DiskPageStore.
+            // should_stream() correctly returns false when pages are flushed.
             if document.should_stream() {
                 // Drop page frames but keep the introspector alive.
                 // drop_pages() ensures introspector is built first.
                 document.drop_pages();
+                // Extract Phase 1's converged introspector to inject into
+                // Phase 2's document. This avoids rebuilding the introspector
+                // during Phase 2 (~104 MB HashMap for 100K-row tables).
+                let phase1_intro = document.extract_introspector();
                 // Free all Phase 1 comemo caches — streaming bypasses them.
                 comemo::evict(0);
+                typst_library::engine_flags::compact_heap_and_trim_ws_full();
 
+                // Enable layout eviction during Phase 2 to cap comemo cache
+                // growth. Without this, text shaping/font caches grow unbounded
+                // during streaming layout (~200+ MB for 100K cells).
+                // Cross-page cache hits are useless in streaming mode since
+                // pages are flushed to disk and never revisited.
+                typst_library::engine_flags::enable_layout_eviction();
                 typst_library::engine_flags::enable_streaming_mode();
                 // Guard ensures streaming mode is disabled even on panic.
                 struct StreamingGuard;
@@ -227,6 +261,18 @@ fn compile_impl<T: Output>(
                 // Replace the converged document with the streaming one.
                 // The old document (with dropped pages) is dropped here.
                 document = streaming_result?;
+
+                // Inject Phase 1's converged introspector into Phase 2's
+                // document. Phase 2 skips building its own introspector
+                // (saving ~104 MB) since introspection has already converged.
+                if let Some(intro) = phase1_intro {
+                    document.set_reused_introspector(intro);
+                }
+
+                // Free Phase 2 comemo caches before PDF export. Text shaping
+                // and other caches are no longer needed since all pages have
+                // been flushed to DiskPageStore.
+                comemo::evict(0);
             }
 
             break;
@@ -259,6 +305,14 @@ fn compile_impl<T: Output>(
         // iterations, never the page data. This prevents holding multiple
         // complete copies of large documents (e.g., 300K pages) in memory.
         document.drop_pages();
+
+        // Clear CellGrid cache between iterations for large single-table
+        // documents where it holds ~151 MB. For multi-table documents,
+        // keep the cache — clearing it can drop Content references that
+        // carry grid_meta needed by PDF tag context.
+        if typst_library::layout::grid::resolve::has_large_cellgrid(50_000) {
+            typst_library::layout::grid::resolve::clear_cellgrid_cache();
+        }
 
         // Evict comemo caches between convergence iterations.
         // For large documents (>8M cumulative grid entries), evict ALL
@@ -295,6 +349,10 @@ fn compile_impl<T: Output>(
     // this holds ~151 MB of Arc<CellGrid> containing Cell.body: Content
     // references that keep the Content tree alive during PDF export.
     typst_library::layout::grid::resolve::clear_cellgrid_cache();
+
+    // Full heap compaction + WS trim. Layout generates ~6 GB of allocation
+    // churn. This is the final boundary before PDF export.
+    typst_library::engine_flags::compact_heap_and_trim_ws_full();
 
     // Promote delayed errors.
     let delayed = sink.delayed();

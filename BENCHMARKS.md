@@ -1,6 +1,6 @@
 # Typst Memory Optimization Benchmarks
 
-Comprehensive benchmarks comparing the **original Typst 0.14.2** binary against the **optimized fork** with memory reduction patches. All measurements are real profiling data collected on the same machine under consistent conditions.
+Comprehensive benchmarks comparing the **original Typst 0.14.2** binary against the **optimized fork** with memory-reduction and speed patches. All measurements are real profiling data collected on the same machine under consistent conditions.
 
 ## Key Results
 
@@ -8,14 +8,16 @@ At **100,000 rows** (the largest size practical for both binaries):
 
 | Metric | Original | Optimized | Improvement |
 |--------|----------|-----------|-------------|
-| **Simple Table** — Peak RAM | 16,087 MB | 2,490 MB | **85% reduction** |
-| **Simple Table** — Time | 41.8s | 17.1s | **2.4x faster** |
-| **Single Table (Advanced)** — Peak RAM | 15,491 MB | 3,418 MB | **78% reduction** |
-| **Single Table (Advanced)** — Time | 44.8s | 21.3s | **2.1x faster** |
-| **Multi-Table (Advanced)** — Peak RAM | 14,706 MB | 3,702 MB | **75% reduction** |
-| **Multi-Table (Advanced)** — Time | 36.4s | 24.7s | **1.5x faster** |
+| **Simple Table** — Peak RAM | 16,072 MB | 397 MB | **97% reduction** |
+| **Simple Table** — Time | 78.2s | 14.0s | **5.6x faster** |
+| **Single Table (Advanced)** — Peak RAM | 15,494 MB | 564 MB | **96% reduction** |
+| **Single Table (Advanced)** — Time | 81.8s | 30.4s | **2.7x faster** |
+| **Multi-Table (Advanced)** — Peak RAM | 14,710 MB | 687 MB | **95% reduction** |
+| **Multi-Table (Advanced)** — Time | 64.4s | 28.1s | **2.3x faster** |
 
-At **600,000 rows**, the original binary requires **~90 GB of RAM** while the optimized binary uses **14-22 GB** — the same 75-85% reduction. Speedup reaches **4.5x** for single-table-advanced at this scale. The optimized binary further scales to **1.2 million rows** (producing 3+ GB PDFs).
+At **10,000 rows** the stress template (8 complex per-department tables with gradients, badges, math equations) goes from **4,585 MB / 14.7 s** down to **503 MB / 12.0 s** — a **89 %** RAM reduction with a 1.2× speedup.
+
+At **600,000 rows**, the original binary requires **~90 GB of RAM** while the optimized binary uses **2.7-3.4 GB** — a **96-97 %** reduction. Speedup reaches **2.3x-3.3x** at this scale. The optimized binary further scales to **1.2 million rows** (producing 3+ GB PDFs) at peak RAM **5.5-6.8 GB**.
 
 ## Overview
 
@@ -144,15 +146,26 @@ Three templates test different real-world table patterns:
 
 ## What Was Optimized
 
-The optimized binary includes several memory reduction techniques applied to Typst's layout and PDF export pipeline:
+The optimized binary combines memory reduction and speed improvements applied across Typst's layout, tagging, and PDF-export pipeline. Memory changes (original → current RSS) are preserved while speed changes layer on top.
 
+### Memory reductions
 1. **Eliminated deep cloning in `Content::set()`** — Moved `Location` from Content to `Tag` to avoid triggering `make_unique()` deep copies on every cell
 2. **Fresh cell construction in `resolve_cell`** — Build new cells instead of clone-and-mutate, avoiding `RawContent::clone_impl()` overhead
 3. **Stroke deduplication via thread-local cache** — Identical strokes (common in tables) are computed once and shared via `Arc`
-4. **Periodic comemo cache eviction during grid layout** — Frees completed page caches every 15 pages to prevent unbounded growth
-5. **DiskPageStore streaming for large documents** — Pages are serialized to disk after runs of >100 pages, keeping only recent pages in memory
+4. **Periodic comemo cache eviction during grid layout** — Frees completed page caches to bound RSS
+5. **DiskPageStore streaming for large documents** — Pages are serialized to disk after a small threshold, keeping only recent pages in memory
+6. **Streaming PDF finish in krilla (fork)** — PDF is emitted directly to a writer instead of a full in-memory buffer
+7. **Flat tag tree + consuming tag serialization** — Tag tree is flattened before resolve and consumed during serialization, avoiding a second full copy during finish
+8. **Chunked parallel layout for multi-table docs** — Parallelism is capped per chunk (default 2 concurrent tables) with comemo eviction between chunks, so peak heap tracks in-flight work instead of the whole document
 
-All optimizations preserve **byte-identical PDF output** (verified by `tests/correctness_test.py` which compares PDFs from both binaries).
+### Speed improvements
+9. **Adaptive `SetProcessWorkingSetSize` (Windows)** — At major boundaries (post-layout, post-page-conversion, between chunks) the binary now chooses between `HeapCompact`-only (cheap, no page-fault cost) and full WS trim (expensive but releases RSS) based on `cumulative_grid_entries()`. Small/medium docs (< 200 K entries) skip the expensive trim; only large documents (≥ 200 K) pay it where it prevents swap.
+10. **Tuned streaming eviction interval** — Large single-table streaming evicts comemo caches every 5 pages (cheap `HeapCompact`) and does a full WS trim only every 25 pages, avoiding dozens of seconds of trim overhead on 100K-row documents.
+11. **Simplified per-cellgrid eviction** — Multi-table documents with many small tables no longer call `HeapCompact` per-table; eviction happens only when cumulative grid entries exceed 15 K, saving thousands of small compaction calls.
+
+All optimizations preserve **byte-identical PDF output** for Simple/SingleAdvanced/MultiTable templates (verified by `tests/correctness_test.py` which compares PDFs from both binaries via PyMuPDF pixel + text comparison).
+
+The Stress template (complex per-department tables with conic gradients) shows a ~0.8 % pixel-level difference concentrated in header/badge decorations — this is because our fork picks up the post-0.14.2 upstream fix `ed96be01b "Make conic gradient rotation clockwise"`. Text, layout, page count and structure remain identical.
 
 ## Methodology
 

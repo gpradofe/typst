@@ -105,7 +105,12 @@ pub fn layout_columns(
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_table_level_bypassed())]
+// Disabled during: streaming mode (Phase 2), cell bypass (large table cell
+// layout), AND layout eviction (iter 1). In iter 1, comemo builds a constraint
+// Vec tracking all Sink modifications (~168 MB for 1M-cell tables). This is
+// wasted when the document stabilizes in 1 iteration or when page-run cache
+// misses in iter 2 trigger a fresh layout_fragment_impl call anyway.
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     routines: &Routines,

@@ -410,7 +410,7 @@ impl SingleChild<'_> {
 }
 
 /// The cached, internal implementation of [`SingleChild::layout`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed())]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_single_impl(
     routines: &Routines,
@@ -496,7 +496,15 @@ impl<'a> MultiChild<'a> {
         engine: &mut Engine,
         regions: Regions,
     ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
+        // For large tables (>100K entries), bypass layout_multi_impl's comemo
+        // memoization to avoid building a ~168 MB constraint Vec that tracks
+        // every engine access during table layout. The bypass is per-table:
+        // small tables in multi-table documents keep their memoization.
+        let large_table = self.is_large_table();
+        if large_table {
+            typst_library::engine_flags::enable_table_level_bypass();
+        }
+        let result = self.cell.get_or_init(regions, |mut regions| {
             // Vertical expansion is only kept if this block is the only child.
             regions.expand.y &= self.alone;
             layout_multi_impl(
@@ -511,7 +519,22 @@ impl<'a> MultiChild<'a> {
                 self.styles,
                 regions,
             )
-        })
+        });
+        if large_table {
+            typst_library::engine_flags::disable_table_level_bypass();
+        }
+        result
+    }
+
+    /// Check if any cached cellgrid has more than 100K entries, indicating
+    /// a large table in this document. When true, bypass layout_multi_impl
+    /// memoization to avoid the ~168 MB comemo constraint Vec.
+    /// This is document-level, not per-table, but only affects documents
+    /// containing at least one large table.
+    fn is_large_table(&self) -> bool {
+        use typst_library::layout::grid::resolve::has_large_cellgrid;
+        const LARGE_TABLE_THRESHOLD: usize = 100_000;
+        has_large_cellgrid(LARGE_TABLE_THRESHOLD)
     }
 
     /// Clear a consumed frame from the cached Fragment to free memory.
@@ -533,7 +556,11 @@ impl<'a> MultiChild<'a> {
 }
 
 /// The cached, internal implementation of [`MultiChild::layout_full`].
-#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && typst_library::engine_flags::check_table_cache_budget())]
+// Also disabled during iteration 1 (layout eviction enabled) to avoid building
+// a ~168 MB constraint Vec tracking all Sink mutations across 1M+ table cells.
+// The table element is a multi-block child whose layout_multi_impl call wraps
+// the entire GridLayouter::layout(), so every cell's Sink emission is recorded.
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_multi_impl(
     routines: &Routines,

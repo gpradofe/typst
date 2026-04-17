@@ -1,7 +1,7 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 
-use ecow::EcoString;
+use ecow::{EcoString, EcoVec};
 use typst_syntax::Span;
 use typst_utils::NonZeroExt;
 
@@ -300,8 +300,14 @@ pub struct TableElem {
 
     /// The contents of the table cells, plus any extra table lines specified
     /// with the [`table.hline`] and [`table.vline`] elements.
+    ///
+    /// Uses `EcoVec` instead of `Vec` so that `Content::clone()` during
+    /// realize doesn't deep-clone 1M+ TableChild items (~80 MB for 100K rows).
+    /// EcoVec::clone is O(1) (refcount increment). No code modifies children
+    /// after table construction, so copy-on-write is never triggered.
     #[variadic]
-    pub children: Vec<TableChild>,
+    #[parse(args.all_eco()?)]
+    pub children: EcoVec<TableChild>,
 }
 
 #[scope]
@@ -329,6 +335,14 @@ impl Synthesize for Packed<TableElem> {
         styles: StyleChain,
     ) -> SourceResult<()> {
         let (grid, cache_key) = cached_table_cellgrid(self, engine, styles)?;
+        // In streaming mode (Phase 2), the CellGrid is already in the global
+        // cache from Phase 1. Skip mutating the element to avoid triggering
+        // make_unique, which deep-clones the entire table element including
+        // all TableChild variants (~80 MB for 100K rows). layout_table falls
+        // back to hash-based cache lookup when grid_cache_key is None.
+        if crate::engine_flags::is_streaming_mode() {
+            return Ok(());
+        }
         // Store cache key so layout_table can find the same cache entry
         // even after materialize() changes the element hash.
         self.grid_cache_key = Some(cache_key);

@@ -80,8 +80,8 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/gpradofe/krilla", rev = "f272083", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/gpradofe/krilla", rev = "f272083" }
+krilla = { git = "https://github.com/gpradofe/krilla.git", rev = "48c7d1b", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { git = "https://github.com/gpradofe/krilla.git", rev = "48c7d1b" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
@@ -192,3 +192,4 @@ pre-build = [
 
 [patch.crates-io]
 comemo = { path = "comemo-local" }
+pdf-writer = { git = "https://github.com/gpradofe/krilla.git", rev = "48c7d1b" }

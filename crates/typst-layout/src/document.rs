@@ -212,9 +212,25 @@ impl Output for PagedDocument {
     }
 
     fn should_stream(&self) -> bool {
-        // Phase 2 disabled: peak RSS is set by Phase 1. Phase 2 can't
-        // reduce the OS high-water mark because it runs after Phase 1.
-        false
+        // Enable Phase 2 streaming only for large single-table documents
+        // (>= 50K entries in one grid). For these, Phase 1 already flushes
+        // pages to DiskPageStore, so pages.len() == 0 and this returns false.
+        // Multi-table documents keep pages in memory for speed.
+        self.pages.len() >= 100
+            && typst_library::layout::grid::resolve::has_large_cellgrid(50_000)
+    }
+
+    fn extract_introspector(&self) -> Option<Box<dyn std::any::Any>> {
+        self.introspector
+            .get()
+            .cloned()
+            .map(|arc| Box::new(arc) as Box<dyn std::any::Any>)
+    }
+
+    fn set_reused_introspector(&mut self, introspector: Box<dyn std::any::Any>) {
+        if let Ok(arc) = introspector.downcast::<std::sync::Arc<PagedIntrospector>>() {
+            let _ = self.introspector.set(*arc);
+        }
     }
 }
 

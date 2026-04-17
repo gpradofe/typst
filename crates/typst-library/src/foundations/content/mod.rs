@@ -373,7 +373,12 @@ impl Content {
             style_elem.styles.apply(styles);
             self
         } else {
-            StyledElem::new(self, styles).into()
+            // Intern the styles to deduplicate identical EcoVec allocations
+            // across table cells. For a 100K-row table where each column has
+            // the same styling, this shares ~5 unique Styles via refcount
+            // instead of allocating ~500K copies (~124 MB savings).
+            let interned = crate::foundations::styles::intern_styles(styles);
+            StyledElem::new(self, interned).into()
         }
     }
 

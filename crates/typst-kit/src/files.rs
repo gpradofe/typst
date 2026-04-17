@@ -114,6 +114,14 @@ where
         }
     }
 
+    /// Clears all cached file data, freeing memory. Unlike `reset()`, this
+    /// drops all slots entirely rather than keeping stale sources for reuse.
+    /// Use after compilation is complete and file data is no longer needed
+    /// (e.g., before PDF export in one-shot mode).
+    pub fn clear_file_data(&mut self) {
+        self.slots.get_mut().clear();
+    }
+
     /// Access the canonical slot for the given file id.
     fn slot<F, T>(&self, id: FileId, f: F) -> FileResult<T>
     where

@@ -179,6 +179,17 @@ struct StackEntry {
 
 pub fn build(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tree> {
     let mut tree = TreeBuilder::new(document, options);
+
+    // Pre-count tags across all pages to reserve Groups capacity upfront.
+    // This avoids Vec doubling waste (~61 MB for 1M-cell tables: 2M capacity
+    // instead of ~1M entries). Add 20% overhead for structural groups
+    // (TR, TBody, THead) added later by context::finish.
+    let tag_count: usize = document.pages().iter().map(|p| count_frame_tags(&p.frame)).sum();
+    if tag_count > 1000 {
+        tree.groups.list.reserve(tag_count + tag_count / 5);
+        tree.groups.tags.reserve(tag_count + tag_count / 5);
+    }
+
     for page in document.pages() {
         visit_frame(&mut tree, &page.frame)?;
     }
@@ -191,24 +202,49 @@ pub fn build(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tre
 pub fn build_from_store(
     document: &PagedDocument,
     options: &PdfOptions,
-    store: &typst_layout::page_store::DiskPageStore,
+    store: &mut typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<Tree> {
     let mut tree = TreeBuilder::new(document, options);
 
-    // Read pages from disk one at a time — each page is dropped after
-    // visiting its frame, so at most one page is in memory.
-    let page_iter = store
-        .pages_iter()
+    // Open a sequential reader independently from the store.
+    // This allows us to mutably borrow the store for consuming
+    // tag reconstruction while reading pages sequentially.
+    let mut reader = store
+        .open_sequential_reader()
         .map_err(|e| ecow::eco_format!("failed to open page store for tags: {e}"))
         .at(typst_syntax::Span::detached())?;
 
-    for page_result in page_iter {
-        let page = page_result
+    let page_count = store.page_count();
+    for i in 0..page_count {
+        // Read page with consuming tag reconstruction — each tag's Content
+        // is taken from the converter via Option::take(), freeing the
+        // reference immediately instead of keeping all ~377 MB alive.
+        let page = store
+            .read_next_page_consuming(&mut reader, i == page_count - 1)
             .map_err(|e| ecow::eco_format!("failed to read page for tags: {e}"))
             .at(typst_syntax::Span::detached())?;
         visit_frame(&mut tree, &page.frame)?;
-        // page is dropped here — frame memory freed
+
+        // After the first page, estimate total groups and pre-allocate.
+        // This avoids Vec doubling waste during tree building.
+        if i == 0 && page_count > 10 {
+            let groups_per_page = tree.groups.list.len();
+            let estimate = groups_per_page * page_count;
+            if estimate > 1000 {
+                let additional = (estimate + estimate / 5)
+                    .saturating_sub(tree.groups.list.capacity());
+                if additional > 0 {
+                    tree.groups.list.reserve(additional);
+                    tree.groups.tags.reserve(additional);
+                }
+            }
+        }
+        // page dropped here — frame memory freed, consumed Content freed
     }
+
+    // Tags were consumed per-page during the loop above.
+    // Clear the (now mostly-empty) tag vec and remaining_tags.
+    store.clear_tag_content();
 
     build_finish(tree, options)
 }
@@ -265,6 +301,25 @@ fn build_finish(mut tree: TreeBuilder, options: &PdfOptions) -> SourceResult<Tre
     }
 
     Ok(tree.finish())
+}
+
+/// Count the number of tagged Start/CellStart events in a frame tree.
+/// Used to pre-allocate Groups capacity before tree building.
+fn count_frame_tags(frame: &Frame) -> usize {
+    let mut count = 0;
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Tag(typst_library::introspection::Tag::Start(_, _, flags))
+            | FrameItem::Tag(typst_library::introspection::Tag::CellStart(_, _, flags))
+                if flags.tagged =>
+            {
+                count += 1;
+            }
+            FrameItem::Group(group) => count += count_frame_tags(&group.frame),
+            _ => {}
+        }
+    }
+    count
 }
 
 fn visit_frame(tree: &mut TreeBuilder, frame: &Frame) -> SourceResult<()> {
