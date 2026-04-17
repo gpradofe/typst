@@ -228,9 +228,7 @@ impl DiskPageStore {
         if is_last && !self.remaining_tags.is_empty() {
             let pos = Point::with_y(page.frame.height());
             page.frame.push_multiple(
-                self.remaining_tags
-                    .drain(..)
-                    .map(|tag| (pos, FrameItem::Tag(tag))),
+                self.remaining_tags.drain(..).map(|tag| (pos, FrameItem::Tag(tag))),
             );
         }
 

@@ -1,8 +1,8 @@
 use std::num::NonZeroU32;
 
 use typst_library::foundations::Packed;
-use typst_library::layout::resolve::{CellGrid, GridMeta};
 use typst_library::layout::GridElem;
+use typst_library::layout::resolve::{CellGrid, GridMeta};
 
 use crate::tags::context::GridId;
 use crate::tags::groups::{CellInfo, GroupId};

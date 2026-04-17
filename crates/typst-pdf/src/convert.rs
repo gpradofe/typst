@@ -272,22 +272,20 @@ pub fn convert_streaming_to_writer<W: std::io::Write>(
 
     match document.finish_to_writer(writer) {
         Ok(()) => Ok(()),
-        Err(e) => {
-            Err(match e {
-                krilla::error::KrillaError::Io(message) => {
-                    ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
-                        typst_syntax::Span::detached(),
-                        ecow::eco_format!("failed to write PDF: {message}"),
-                    )]
-                }
-                _ => {
-                    ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
-                        typst_syntax::Span::detached(),
-                        ecow::eco_format!("PDF export error: {e:?}"),
-                    )]
-                }
-            })
-        }
+        Err(e) => Err(match e {
+            krilla::error::KrillaError::Io(message) => {
+                ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
+                    typst_syntax::Span::detached(),
+                    ecow::eco_format!("failed to write PDF: {message}"),
+                )]
+            }
+            _ => {
+                ecow::eco_vec![typst_library::diag::SourceDiagnostic::error(
+                    typst_syntax::Span::detached(),
+                    ecow::eco_format!("PDF export error: {e:?}"),
+                )]
+            }
+        }),
     }
 }
 

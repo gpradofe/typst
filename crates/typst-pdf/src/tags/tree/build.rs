@@ -184,7 +184,8 @@ pub fn build(document: &PagedDocument, options: &PdfOptions) -> SourceResult<Tre
     // This avoids Vec doubling waste (~61 MB for 1M-cell tables: 2M capacity
     // instead of ~1M entries). Add 20% overhead for structural groups
     // (TR, TBody, THead) added later by context::finish.
-    let tag_count: usize = document.pages().iter().map(|p| count_frame_tags(&p.frame)).sum();
+    let tag_count: usize =
+        document.pages().iter().map(|p| count_frame_tags(&p.frame)).sum();
     if tag_count > 1000 {
         tree.groups.list.reserve(tag_count + tag_count / 5);
         tree.groups.tags.reserve(tag_count + tag_count / 5);
@@ -231,8 +232,8 @@ pub fn build_from_store(
             let groups_per_page = tree.groups.list.len();
             let estimate = groups_per_page * page_count;
             if estimate > 1000 {
-                let additional = (estimate + estimate / 5)
-                    .saturating_sub(tree.groups.list.capacity());
+                let additional =
+                    (estimate + estimate / 5).saturating_sub(tree.groups.list.capacity());
                 if additional > 0 {
                     tree.groups.list.reserve(additional);
                     tree.groups.tags.reserve(additional);
@@ -507,7 +508,12 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
     } else if let Some(_) = elem.to_packed::<TitleElem>() {
         push_tag(tree, elem, loc, Tag::Title)
     } else if let Some(entry) = elem.to_packed::<OutlineEntry>() {
-        push_group(tree, elem, loc, GroupKind::OutlineEntry(Box::new((entry.clone(), None))))
+        push_group(
+            tree,
+            elem,
+            loc,
+            GroupKind::OutlineEntry(Box::new((entry.clone(), None))),
+        )
     } else if let Some(_) = elem.to_packed::<ListElem>() {
         // TODO: infer numbering from `list.marker`
         let numbering = ListNumbering::Circle;
@@ -534,11 +540,21 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
     } else if let Some(image) = elem.to_packed::<ImageElem>() {
         let lang = image.locale;
         let bbox = tree.ctx.new_bbox();
-        push_group(tree, elem, loc, GroupKind::Image(Box::new((image.clone(), bbox, lang))))
+        push_group(
+            tree,
+            elem,
+            loc,
+            GroupKind::Image(Box::new((image.clone(), bbox, lang))),
+        )
     } else if let Some(equation) = elem.to_packed::<EquationElem>() {
         let lang = equation.locale;
         let bbox = tree.ctx.new_bbox();
-        push_group(tree, elem, loc, GroupKind::Formula(Box::new((equation.clone(), bbox, lang))))
+        push_group(
+            tree,
+            elem,
+            loc,
+            GroupKind::Formula(Box::new((equation.clone(), bbox, lang))),
+        )
     } else if let Some(table) = elem.to_packed::<TableElem>() {
         let group_id = tree.groups.list.next_id();
         let table_id = tree.ctx.tables.next_id();
@@ -630,7 +646,12 @@ fn progress_tree_start(tree: &mut TreeBuilder, elem: &Content, loc: Location) ->
         }
     } else if let Some(place) = elem.to_packed::<PlaceElem>() {
         if place.float.val() {
-            push_located(tree, elem, loc, GroupKind::LogicalParent(Box::new(elem.clone())))
+            push_located(
+                tree,
+                elem,
+                loc,
+                GroupKind::LogicalParent(Box::new(elem.clone())),
+            )
         } else {
             no_progress(tree)
         }

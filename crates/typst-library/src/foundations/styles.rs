@@ -236,12 +236,12 @@ pub fn intern_styles(styles: Styles) -> Styles {
 
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(cached) = cache.get(&key) {
-            if *cached == styles {
-                return cached.clone(); // EcoVec clone = refcount increment, O(1)
-            }
-            // Hash collision — extremely rare, just use the new styles
+        if let Some(cached) = cache.get(&key)
+            && *cached == styles
+        {
+            return cached.clone(); // EcoVec clone = refcount increment, O(1)
         }
+        // Cache miss or hash collision — insert the new styles.
         cache.insert(key, styles.clone());
         styles
     })

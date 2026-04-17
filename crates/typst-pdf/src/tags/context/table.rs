@@ -3,11 +3,11 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
+use ecow::EcoString;
 use krilla::tagging as kt;
 use krilla::tagging::{NaiveRgbColor, Tag, TagKind};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use ecow::EcoString;
 use typst_library::foundations::{Packed, Smart};
 use typst_library::layout::resolve::{GridMeta, Line, LinePosition};
 use typst_library::layout::{Abs, Sides};
@@ -115,8 +115,12 @@ impl TableCtx {
         let rowspan = info.rowspan();
         let colspan = info.colspan();
 
-        let kind = info.kind()
-            .and_then(|k| match k { Smart::Custom(k) => Some(k), Smart::Auto => None })
+        let kind = info
+            .kind()
+            .and_then(|k| match k {
+                Smart::Custom(k) => Some(k),
+                Smart::Auto => None,
+            })
             .unwrap_or(self.row_kinds[y as usize]);
 
         self.cells.insert(CtxCell {
@@ -707,12 +711,13 @@ fn resolve_cell_border_and_background(
     // defines `BorderStyle::None` as the default. So make sure to write
     // the correct border styles. When a parent border_style is set (uniform
     // tables), cells that match inherit it → no per-cell attribute needed.
-    let border_style = resolve_sides(&fixed, parent_border_style, Some(kt::BorderStyle::None), |s| {
-        s.map(|s| match s.dash {
-            Some(_) => kt::BorderStyle::Dashed,
-            None => kt::BorderStyle::Solid,
-        })
-    });
+    let border_style =
+        resolve_sides(&fixed, parent_border_style, Some(kt::BorderStyle::None), |s| {
+            s.map(|s| match s.dash {
+                Some(_) => kt::BorderStyle::Dashed,
+                None => kt::BorderStyle::Solid,
+            })
+        });
 
     // In Acrobat `BorderThickness` takes precedence over `BorderStyle`. If
     // A `BorderThickness != 0` is specified for a side the border is drawn

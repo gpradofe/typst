@@ -509,11 +509,23 @@ pub struct Group {
 
 impl Group {
     fn new(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: SmallVec::new(), weak: false }
+        Group {
+            parent,
+            span,
+            kind,
+            nodes: SmallVec::new(),
+            weak: false,
+        }
     }
 
     fn weak(parent: GroupId, span: Span, kind: GroupKind) -> Self {
-        Group { parent, span, kind, nodes: SmallVec::new(), weak: true }
+        Group {
+            parent,
+            span,
+            kind,
+            nodes: SmallVec::new(),
+            weak: true,
+        }
     }
 
     pub fn nodes(&self) -> &[TagNode] {
@@ -574,10 +586,18 @@ pub struct CellInfo {
 }
 
 impl CellInfo {
-    pub fn x(&self) -> u32 { self.x as u32 }
-    pub fn y(&self) -> u32 { self.y }
-    pub fn colspan(&self) -> u32 { self.colspan as u32 }
-    pub fn rowspan(&self) -> u32 { self.rowspan as u32 }
+    pub fn x(&self) -> u32 {
+        self.x as u32
+    }
+    pub fn y(&self) -> u32 {
+        self.y
+    }
+    pub fn colspan(&self) -> u32 {
+        self.colspan as u32
+    }
+    pub fn rowspan(&self) -> u32 {
+        self.rowspan as u32
+    }
 
     pub fn kind(&self) -> Option<Smart<TableCellKind>> {
         match self.kind_packed {
@@ -613,7 +633,7 @@ impl CellInfo {
                     TableHeaderScope::Column => 1,
                     TableHeaderScope::Row => 2,
                 };
-                4 + (((level.get() as u16).saturating_sub(1)) << 2) | scope_bits
+                4 + (((level.get() as u16).saturating_sub(1)) << 2 | scope_bits)
             }
         }
     }
@@ -639,16 +659,12 @@ impl CellInfo {
     }
 
     pub fn from_cell_tag_meta(meta: &CellTagMeta) -> Self {
-        let kind = if meta.is_table() {
-            Some(meta.to_table_cell_kind())
-        } else {
-            None
-        };
+        let kind = if meta.is_table() { Some(meta.to_table_cell_kind()) } else { None };
         Self {
-            x: meta.x as u16,
-            y: meta.y as u32,
-            colspan: meta.colspan as u16,
-            rowspan: meta.rowspan as u16,
+            x: meta.x,
+            y: meta.y,
+            colspan: meta.colspan,
+            rowspan: meta.rowspan,
             kind_packed: Self::encode_kind(kind),
         }
     }

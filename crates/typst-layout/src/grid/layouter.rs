@@ -411,10 +411,8 @@ impl<'a> GridLayouter<'a> {
         let ng_x = if self.grid.has_gutter { pos.x / 2 } else { pos.x };
         let ng_y = if self.grid.has_gutter { pos.y / 2 } else { pos.y };
         let idx = ng_y * self.non_gutter_cols + ng_x;
-        let mut cell_locator = Locator::from_parts(
-            self.cell_locator_locals[idx],
-            self.cell_locator_outer,
-        );
+        let mut cell_locator =
+            Locator::from_parts(self.cell_locator_locals[idx], self.cell_locator_outer);
 
         // The disambiguator is used for repeated cells, e.g. in repeated headers.
         if disambiguator > 0 {
@@ -484,19 +482,18 @@ impl<'a> GridLayouter<'a> {
         // slower with threshold 5K because disk I/O and cache rebuilds dominated.
         // In streaming mode, always flush regardless of size.
         const FLUSH_ENTRY_THRESHOLD: usize = 50_000;
-        let frame_flush_threshold: usize = if streaming
-            || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD
-        {
-            1
-        } else {
-            usize::MAX // small/medium grids don't flush
-        };
+        let frame_flush_threshold: usize =
+            if streaming || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD {
+                1
+            } else {
+                usize::MAX // small/medium grids don't flush
+            };
         // Use disk-backed frame store for large grids even during convergence.
         // MemoryFrameStore keeps all serialized frames in a Vec<u8>, consuming
         // ~1.5 GB for 100K-row tables. DiskFrameStore writes to a temp file,
         // keeping only metadata in RAM.
-        let use_disk_store = streaming
-            || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD;
+        let use_disk_store =
+            streaming || self.grid.entries.len() >= FLUSH_ENTRY_THRESHOLD;
 
         let mut y = 0;
         let mut consecutive_header_count = 0;

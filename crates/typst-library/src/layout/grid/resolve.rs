@@ -454,11 +454,14 @@ impl ResolvableCell for Packed<TableCell> {
         let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
         // Arc-share identical stroke patterns via hash cache.
         let stroke_hash = typst_utils::hash128(&(
-            &stroke_sides.top, &stroke_sides.right,
-            &stroke_sides.bottom, &stroke_sides.left,
+            &stroke_sides.top,
+            &stroke_sides.right,
+            &stroke_sides.bottom,
+            &stroke_sides.left,
         ));
         let stroke = FULL_STROKE_CACHE.with(|cache| {
-            cache.borrow_mut()
+            cache
+                .borrow_mut()
                 .entry(stroke_hash)
                 .or_insert_with(|| Arc::new(stroke_sides))
                 .clone()
@@ -598,11 +601,14 @@ impl ResolvableCell for Packed<GridCell> {
         let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
         // Arc-share identical stroke patterns via hash cache.
         let stroke_hash = typst_utils::hash128(&(
-            &stroke_sides.top, &stroke_sides.right,
-            &stroke_sides.bottom, &stroke_sides.left,
+            &stroke_sides.top,
+            &stroke_sides.right,
+            &stroke_sides.bottom,
+            &stroke_sides.left,
         ));
         let stroke = FULL_STROKE_CACHE.with(|cache| {
-            cache.borrow_mut()
+            cache
+                .borrow_mut()
                 .entry(stroke_hash)
                 .or_insert_with(|| Arc::new(stroke_sides))
                 .clone()
@@ -1412,20 +1418,17 @@ impl GridMeta {
             .map(|e| match e {
                 Entry::Cell(cell) => {
                     // Find or insert the stroke pattern.
-                    let stroke_key = typst_utils::hash128(&(
-                        &cell.stroke,
-                        &cell.stroke_overridden,
-                    )) as u64;
-                    let stroke_idx = *stroke_map
-                        .entry(stroke_key)
-                        .or_insert_with(|| {
-                            let idx = unique_strokes.len() as u16;
-                            unique_strokes.push(StrokePattern {
-                                stroke: (*cell.stroke).clone(),
-                                stroke_overridden: cell.stroke_overridden,
-                            });
-                            idx
+                    let stroke_key =
+                        typst_utils::hash128(&(&cell.stroke, &cell.stroke_overridden))
+                            as u64;
+                    let stroke_idx = *stroke_map.entry(stroke_key).or_insert_with(|| {
+                        let idx = unique_strokes.len() as u16;
+                        unique_strokes.push(StrokePattern {
+                            stroke: (*cell.stroke).clone(),
+                            stroke_overridden: cell.stroke_overridden,
                         });
+                        idx
+                    });
 
                     MetaEntry::Cell(MetaCell {
                         stroke_idx,
@@ -1442,9 +1445,7 @@ impl GridMeta {
                         }),
                     })
                 }
-                Entry::Merged { parent } => {
-                    MetaEntry::Merged { parent: *parent as u32 }
-                }
+                Entry::Merged { parent } => MetaEntry::Merged { parent: *parent as u32 },
                 Entry::Empty => unreachable!("empty entry after grid resolution"),
             })
             .collect();
@@ -2184,7 +2185,8 @@ impl CellGridResolver<'_, '_> {
 
                     if resolved_cells.len() <= columns * group_start {
                         // Ensure the automatically chosen row actually exists.
-                        resolved_cells.resize_with(columns * (group_start + 1), || Entry::Empty);
+                        resolved_cells
+                            .resize_with(columns * (group_start + 1), || Entry::Empty);
                     }
 
                     // Even though this header or footer is fully empty, we add one
@@ -2203,14 +2205,13 @@ impl CellGridResolver<'_, '_> {
                         ),
                         RowGroupKind::Footer => TableCellKind::Footer,
                     };
-                    resolved_cells[*local_auto_index] =
-                        Entry::Cell(self.resolve_cell(
-                            T::default(),
-                            0,
-                            first_available_row,
-                            1,
-                            Smart::Custom(kind),
-                        )?);
+                    resolved_cells[*local_auto_index] = Entry::Cell(self.resolve_cell(
+                        T::default(),
+                        0,
+                        first_available_row,
+                        1,
+                        Smart::Custom(kind),
+                    )?);
 
                     group_start..group_end
                 }
@@ -2315,17 +2316,12 @@ impl CellGridResolver<'_, '_> {
 
         // Replace empty entries in-place with resolved default cells.
         // This avoids allocating a second Vec<Entry> (~151 MB for 300K cells).
-        for i in 0..resolved_cells.len() {
-            if resolved_cells[i].is_empty() {
+        for (i, entry) in resolved_cells.iter_mut().enumerate() {
+            if entry.is_empty() {
                 let x = i % columns;
                 let y = i / columns;
-                resolved_cells[i] = Entry::Cell(self.resolve_cell(
-                    T::default(),
-                    x,
-                    y,
-                    1,
-                    Smart::Auto,
-                )?);
+                *entry =
+                    Entry::Cell(self.resolve_cell(T::default(), x, y, 1, Smart::Auto)?);
             }
         }
 
@@ -2925,7 +2921,10 @@ fn resolve_cell_position(
                     // in which case we can just expand the vector enough to
                     // place this cell. In either case, we found an available
                     // position.
-                    matches!(resolved_cells.get(*possible_index), None | Some(Entry::Empty))
+                    matches!(
+                        resolved_cells.get(*possible_index),
+                        None | Some(Entry::Empty)
+                    )
                 })
                 .ok_or_else(|| {
                     eco_format!(
@@ -3052,4 +3051,3 @@ fn skip_auto_index_through_fully_merged_rows(
         }
     }
 }
-

@@ -261,8 +261,7 @@ fn layout_pages_streaming<'a>(
     //   Each department has its own page run (8+ runs). Rayon gives 2-3x
     //   speedup. Pages flushed to disk after parallel results arrive.
     let has_many_tables = cumulative_entries >= 50_000;
-    let use_streaming_layout = has_large_grid
-        || (has_many_tables && run_count <= 4);
+    let use_streaming_layout = has_large_grid || (has_many_tables && run_count <= 4);
     // Flush to DiskPageStore for all large documents (streaming or parallel).
     let mut flushing = streaming || use_streaming_layout || has_many_tables;
     let mut store: Option<DiskPageStore> = if flushing {
@@ -277,12 +276,11 @@ fn layout_pages_streaming<'a>(
     // In streaming mode (Phase 2), skip building the introspector — Phase 1's
     // converged introspector is reused instead, saving ~104 MB.
     // For Phase 1, build incrementally during layout as before.
-    let mut intro_builder: Option<PagedIntrospectorBuilder> =
-        if flushing && !streaming {
-            Some(PagedIntrospectorBuilder::with_capacity(0))
-        } else {
-            None
-        };
+    let mut intro_builder: Option<PagedIntrospectorBuilder> = if flushing && !streaming {
+        Some(PagedIntrospectorBuilder::with_capacity(0))
+    } else {
+        None
+    };
 
     // Shared logic: process a single finalized page (flush or accumulate).
     let process_page = |page: Page,
@@ -396,8 +394,7 @@ fn layout_pages_streaming<'a>(
                             if has_large_grid && flushing {
                                 const EVICT_INTERVAL: usize = 5;
                                 const TRIM_INTERVAL: usize = 25;
-                                if total_pages >= last_evict_page + EVICT_INTERVAL
-                                {
+                                if total_pages >= last_evict_page + EVICT_INTERVAL {
                                     comemo::evict(0);
                                     if total_pages / TRIM_INTERVAL
                                         > last_evict_page / TRIM_INTERVAL
@@ -509,8 +506,7 @@ fn layout_pages_streaming<'a>(
                     for layouted in results {
                         let layouted = layouted?;
                         for lp in layouted {
-                            let page =
-                                finalize(engine, &mut counter, &mut tags, lp)?;
+                            let page = finalize(engine, &mut counter, &mut tags, lp)?;
                             process_page(
                                 page,
                                 &mut total_pages,

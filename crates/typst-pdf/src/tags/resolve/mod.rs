@@ -124,18 +124,23 @@ pub fn resolve(
     // one because resolve_node/resolve_group_node take it as a parameter.
     // In non-streaming mode, parent_ref is None so serialize_group is never called.
     let mut serializer = document.tag_serializer();
-    let parent_ref_for_root = if use_streaming {
-        Some(serializer.document_ref())
-    } else {
-        None
-    };
+    let parent_ref_for_root =
+        if use_streaming { Some(serializer.document_ref()) } else { None };
 
     let root_children = std::mem::take(&mut resolver.children[GroupId::ROOT.idx()]);
     let mut accum = Accumulator::root();
     accum.reserve(root_children.len());
 
     for child in root_children.iter() {
-        resolve_node(&mut resolver, &mut serializer, &mut doc_lang, &mut None, &mut accum, child, parent_ref_for_root);
+        resolve_node(
+            &mut resolver,
+            &mut serializer,
+            &mut doc_lang,
+            &mut None,
+            &mut accum,
+            child,
+            parent_ref_for_root,
+        );
     }
     drop(root_children);
 
@@ -295,9 +300,9 @@ fn resolve_group_node(
     // children would be recursively serialized by serialize_group, which
     // fails for annotation identifiers (annotation refs aren't available
     // until after page serialization).
-    let has_unserializable_children = nodes.iter().any(|n| {
-        matches!(n, Node::Group(_) | Node::PreAllocGroup(_, _))
-    });
+    let has_unserializable_children = nodes
+        .iter()
+        .any(|n| matches!(n, Node::Group(_) | Node::PreAllocGroup(_, _)));
 
     if let Some(p_ref) = parent_ref {
         let group = kt::TagGroup::with_children(tag, nodes);

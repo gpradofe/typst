@@ -140,8 +140,7 @@ pub const TABLE_CACHE_ENTRY_LIMIT: usize = 8_000_000;
 /// large documents.
 pub fn check_table_cache_budget() -> bool {
     let prev = TABLE_MULTI_CALLS.fetch_add(1, Ordering::Relaxed);
-    prev < TABLE_CACHE_BUDGET
-        && cumulative_grid_entries() < TABLE_CACHE_ENTRY_LIMIT
+    prev < TABLE_CACHE_BUDGET && cumulative_grid_entries() < TABLE_CACHE_ENTRY_LIMIT
 }
 
 /// Reset the table layout counter (between convergence iterations).
@@ -205,4 +204,3 @@ pub fn compact_heap_and_trim_ws_full() {
         SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
-

@@ -514,9 +514,7 @@ impl FrameConverter {
 
     fn reconstruct_frame_item_consuming(&mut self, si: SFrameItem) -> FrameItem {
         match si {
-            SFrameItem::Group(g) => {
-                FrameItem::Group(self.reconstruct_group_consuming(g))
-            }
+            SFrameItem::Group(g) => FrameItem::Group(self.reconstruct_group_consuming(g)),
             SFrameItem::Text(t) => FrameItem::Text(self.reconstruct_text(t)),
             SFrameItem::Shape(s, span) => {
                 FrameItem::Shape(self.reconstruct_shape(s), raw_to_span(span))
@@ -536,9 +534,7 @@ impl FrameConverter {
                 self.reconstruct_destination(dest),
                 Size::new(Abs::raw(w), Abs::raw(h)),
             ),
-            SFrameItem::Tag(tag) => {
-                FrameItem::Tag(self.reconstruct_tag_consuming(tag))
-            }
+            SFrameItem::Tag(tag) => FrameItem::Tag(self.reconstruct_tag_consuming(tag)),
         }
     }
 
@@ -573,7 +569,9 @@ impl FrameConverter {
                     introspectable: flags.introspectable,
                     tagged: flags.tagged,
                 };
-                if let Some(content) = self.tags.get_mut(id as usize).and_then(|opt| opt.take()) {
+                if let Some(content) =
+                    self.tags.get_mut(id as usize).and_then(|opt| opt.take())
+                {
                     Tag::Start(content, Location::new(loc), tag_flags)
                 } else {
                     Tag::CellStart(
