@@ -558,12 +558,11 @@ pub fn hline_stroke_at_column(
 
 #[cfg(test)]
 mod test {
-    use std::num::NonZeroUsize;
+    use std::num::NonZeroU32;
     use typst_library::foundations::{Content, Smart};
     use typst_library::layout::grid::resolve::{Cell, Entry, LinePosition};
     use typst_library::layout::{Axes, Sides, Sizing};
     use typst_syntax::Span;
-    use typst_utils::NonZeroExt;
 
     use super::*;
 
@@ -571,9 +570,9 @@ mod test {
         Cell {
             body: Content::default(),
             fill: None,
-            colspan: NonZeroUsize::ONE,
-            rowspan: NonZeroUsize::ONE,
-            stroke: Sides::splat(Some(Arc::new(Stroke::default()))),
+            colspan: NonZeroU32::MIN,
+            rowspan: NonZeroU32::MIN,
+            stroke: Arc::new(Sides::splat(Some(Arc::new(Stroke::default())))),
             stroke_overridden: Sides::splat(false),
             breakable: true,
             resolved_inset: None,
@@ -588,9 +587,9 @@ mod test {
         Cell {
             body: Content::default(),
             fill: None,
-            colspan: NonZeroUsize::try_from(colspan).unwrap(),
-            rowspan: NonZeroUsize::try_from(rowspan).unwrap(),
-            stroke: Sides::splat(Some(Arc::new(Stroke::default()))),
+            colspan: NonZeroU32::try_from(colspan as u32).unwrap(),
+            rowspan: NonZeroU32::try_from(rowspan as u32).unwrap(),
+            stroke: Arc::new(Sides::splat(Some(Arc::new(Stroke::default())))),
             stroke_overridden: Sides::splat(false),
             breakable: true,
             resolved_inset: None,

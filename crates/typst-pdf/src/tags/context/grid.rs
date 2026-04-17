@@ -132,31 +132,6 @@ impl<T: Clone> GridCells<T> {
         }
     }
 
-    /// Mutably borrows disjoint cells. Cells are considered disjoint if their
-    /// positions don't resolve to the same parent cell in case of a
-    /// [`GridEntry::Cell`] or indirectly through a [`GridEntry::Spanned`].
-    ///
-    /// # Panics
-    ///
-    /// If one of the positions points to a [`GridEntry::Missing`].
-    pub fn cells_disjoint_mut<const N: usize>(
-        &mut self,
-        positions: [(u32, u32); N],
-    ) -> Option<[&mut CtxCell<T>; N]> {
-        let indices = positions.map(|(x, y)| {
-            let idx = self.cell_idx(x, y);
-            let cell = &self.entries[idx];
-            match cell {
-                GridEntry::Cell(_) => idx,
-                &GridEntry::Spanned(idx) => idx,
-                GridEntry::Missing => unreachable!(),
-            }
-        });
-
-        let entries = self.entries.get_disjoint_mut(indices).ok()?;
-        Some(entries.map(|entry| entry.as_cell_mut().unwrap()))
-    }
-
     pub fn resolve<'a>(&'a self, cell: &'a GridEntry<T>) -> Option<&'a CtxCell<T>> {
         match cell {
             GridEntry::Cell(cell) => Some(cell),

@@ -26,13 +26,6 @@ mod resolve;
 mod tree;
 mod util;
 
-/// Run context::finish early to free heavy data (TableCtx cells, etc.)
-/// before page conversion loads additional data. Idempotent — safe to call
-/// multiple times.
-pub fn finish_context(tags: &mut Tags) {
-    context::finish(&mut tags.tree);
-}
-
 /// Free the locations map after page conversion completes. The map is only
 /// needed during tree building and page stepping (step_end_tag). Freeing it
 /// before tags::resolve saves ~69 MB at peak during build_table.

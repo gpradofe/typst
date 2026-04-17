@@ -263,7 +263,6 @@ pub fn convert_streaming_to_writer<W: std::io::Write>(
     // tag tree context, font caches, and image maps — all no longer needed.
     // Freeing here reduces peak memory during krilla's serialize_pages +
     // serialize_tag_tree phase.
-    let config = options.standards.config;
     drop(gc);
     comemo::evict(0);
     // Keep full WS trim here — this is the final major boundary before
@@ -271,7 +270,6 @@ pub fn convert_streaming_to_writer<W: std::io::Write>(
     // serialization. Releasing RSS here materially reduces peak.
     typst_library::engine_flags::compact_heap_and_trim_ws_full();
 
-    let validator = config.validator();
     match document.finish_to_writer(writer) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -664,22 +662,6 @@ pub(crate) fn handle_group(
     fc.pop();
 
     Ok(())
-}
-
-/// Finish a krilla document by streaming to a writer (no in-memory PDF buffer).
-#[typst_macros::time(name = "finish export streaming")]
-fn finish_to_writer<W: std::io::Write>(
-    document: Document,
-    gc: GlobalContext,
-    configuration: Configuration,
-    writer: W,
-) -> SourceResult<()> {
-    let validator = configuration.validator();
-
-    match document.finish_to_writer(writer) {
-        Ok(()) => Ok(()),
-        Err(e) => handle_krilla_error(e, &gc, validator, configuration),
-    }
 }
 
 /// Finish a krilla document and handle export errors.
