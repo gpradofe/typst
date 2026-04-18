@@ -159,3 +159,69 @@ fn human_bytes(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_is_monotonic_across_pipeline() {
+        let seq = [
+            (Event::Stage("eval"), 5),
+            (Event::Stage("layout"), 10),
+            (Event::Iteration(1), 10),
+            (Event::Iteration(2), 15),
+            (Event::Iteration(5), 30),
+            (Event::Pages(100), 40),
+            (Event::Stage("export"), 40),
+            (Event::PageEmitted { done: 1, total: 100 }, 40),
+            (Event::PageEmitted { done: 50, total: 100 }, 67),
+            (Event::PageEmitted { done: 100, total: 100 }, 95),
+            (Event::Wrote { bytes: 0 }, 100),
+        ];
+        let mut last = 0u8;
+        for (event, expected) in seq {
+            let got = percent_for(&event);
+            assert_eq!(got, expected, "event {:?}", event);
+            assert!(got >= last, "percent went backwards: {} -> {}", last, got);
+            last = got;
+        }
+    }
+
+    #[test]
+    fn percent_handles_zero_pages_gracefully() {
+        let pct = percent_for(&Event::PageEmitted { done: 0, total: 0 });
+        assert_eq!(pct, 95);
+    }
+
+    #[test]
+    fn percent_caps_iteration_weight() {
+        assert_eq!(percent_for(&Event::Iteration(100)), 30);
+    }
+
+    #[test]
+    fn human_bytes_picks_appropriate_unit() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn describe_emits_expected_strings() {
+        assert_eq!(describe(&Event::Stage("eval")), "eval");
+        assert_eq!(describe(&Event::Iteration(3)), "layout iteration 3");
+        assert_eq!(describe(&Event::Pages(42)), "layout converged, 42 page(s)");
+        assert_eq!(
+            describe(&Event::PageEmitted { done: 10, total: 237 }),
+            "export 10/237",
+        );
+        assert_eq!(
+            describe(&Event::Wrote { bytes: 1024 * 1024 }),
+            "wrote (1.0 MB)",
+        );
+    }
+}

@@ -197,6 +197,60 @@ fn test_network_access_hint() {
 }
 
 #[test]
+fn test_progress_flag_emits_percentages() {
+    let project = tempfs();
+    let main = project.write("main.typ", "= Hello\nSome body text.");
+    let output = exec().arg("compile").arg(&main).arg("-p").must_succeed();
+    output
+        .stderr
+        .must_contain("[progress")
+        .must_contain("% ")
+        .must_contain("100%");
+}
+
+#[test]
+fn test_verbose_flag_emits_stages() {
+    let project = tempfs();
+    let main = project.write("main.typ", "= Hello");
+    let output = exec().arg("compile").arg(&main).arg("-v").must_succeed();
+    output
+        .stderr
+        .must_contain("[typst")
+        .must_contain("stage: eval")
+        .must_contain("stage: layout")
+        .must_contain("stage: export")
+        .must_contain("wrote output");
+}
+
+#[test]
+fn test_progress_and_verbose_combine() {
+    let project = tempfs();
+    let main = project.write("main.typ", "= Hello");
+    let output = exec()
+        .arg("compile")
+        .arg(&main)
+        .arg("-p")
+        .arg("-v")
+        .must_succeed();
+    output
+        .stderr
+        .must_contain("[progress")
+        .must_contain("[typst");
+}
+
+#[test]
+fn test_no_progress_flag_means_silent_stderr() {
+    let project = tempfs();
+    let main = project.write("main.typ", "= Hello");
+    let output = exec().arg("compile").arg(&main).must_succeed();
+    let stderr = format!("{:?}", output.stderr);
+    assert!(
+        !stderr.contains("[progress") && !stderr.contains("[typst"),
+        "unexpected progress output when flags are off: {stderr}",
+    );
+}
+
+#[test]
 fn test_tracepoints() {
     let project = tempfs();
     let main = project.write(
