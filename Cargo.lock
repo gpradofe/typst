@@ -1576,7 +1576,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.6.0"
-source = "git+https://github.com/gpradofe/krilla.git?rev=aff54bc#aff54bcf71752576d87a5a909f9f98d885351938"
+source = "git+https://github.com/gpradofe/krilla.git?rev=47b463b#47b463b5bdc9058f258f197581dd30dd2d5eb375"
 dependencies = [
  "base64",
  "bumpalo",
@@ -1607,7 +1607,7 @@ dependencies = [
 [[package]]
 name = "krilla-svg"
 version = "0.3.0"
-source = "git+https://github.com/gpradofe/krilla.git?rev=aff54bc#aff54bcf71752576d87a5a909f9f98d885351938"
+source = "git+https://github.com/gpradofe/krilla.git?rev=47b463b#47b463b5bdc9058f258f197581dd30dd2d5eb375"
 dependencies = [
  "flate2",
  "fontdb",
@@ -2091,7 +2091,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 [[package]]
 name = "pdf-writer"
 version = "0.14.0"
-source = "git+https://github.com/gpradofe/krilla.git?rev=aff54bc#aff54bcf71752576d87a5a909f9f98d885351938"
+source = "git+https://github.com/gpradofe/krilla.git?rev=47b463b#47b463b5bdc9058f258f197581dd30dd2d5eb375"
 dependencies = [
  "bitflags 2.9.1",
  "itoa",
