@@ -3,7 +3,6 @@
     - Tag: Div
       /K:
         - Tag: Code
-          /Placement: Block
           /K:
             - Content: page=0 mcid=4
     - Tag: Div
@@ -33,7 +32,6 @@
     - Tag: Div
       /K:
         - Tag: Span
-          /Placement: Block
           /TextDecorationType: Underline
           /K:
             - Content: page=0 mcid=5

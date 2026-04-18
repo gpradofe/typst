@@ -10,7 +10,6 @@ lang: "de"
             - Content: page=0 mcid=1
         - Tag: Code
           /Lang: "en"
-          /Placement: Block
           /K:
             - Content: page=0 mcid=0
     - Tag: Div

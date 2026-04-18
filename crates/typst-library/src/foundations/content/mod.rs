@@ -99,6 +99,13 @@ impl Content {
         self.0.elem()
     }
 
+    /// Returns a pointer-based identity for this content allocation.
+    /// Two Content values backed by the same allocation (e.g., clones)
+    /// return the same value. Cheap O(1) alternative to hashing.
+    pub fn identity(&self) -> usize {
+        self.0.identity()
+    }
+
     /// Get the span of the content.
     pub fn span(&self) -> Span {
         self.0.span()
@@ -366,7 +373,12 @@ impl Content {
             style_elem.styles.apply(styles);
             self
         } else {
-            StyledElem::new(self, styles).into()
+            // Intern the styles to deduplicate identical EcoVec allocations
+            // across table cells. For a 100K-row table where each column has
+            // the same styling, this shares ~5 unique Styles via refcount
+            // instead of allocating ~500K copies (~124 MB savings).
+            let interned = crate::foundations::styles::intern_styles(styles);
+            StyledElem::new(self, interned).into()
         }
     }
 

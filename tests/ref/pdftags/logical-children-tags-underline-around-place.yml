@@ -5,7 +5,6 @@
       /K:
         - Content: page=0 mcid=0
 - Tag: Span
-  /Placement: Block
   /TextDecorationType: Underline
   /K:
     - Content: page=0 mcid=3

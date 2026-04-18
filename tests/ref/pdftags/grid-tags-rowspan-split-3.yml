@@ -3,7 +3,6 @@
     - Tag: Div
       /K:
         - Tag: Strong
-          /Placement: Block
           /K:
             - Content: page=0 mcid=4
               /Lang: "en"
@@ -20,7 +19,6 @@
             - Content: page=4 mcid=0
             - Content: page=4 mcid=1
         - Tag: Strong
-          /Placement: Block
           /K:
             - Content: page=4 mcid=2
               /Lang: "en"

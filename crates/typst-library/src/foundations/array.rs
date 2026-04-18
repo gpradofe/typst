@@ -1256,6 +1256,12 @@ impl<T: IntoValue, const N: usize> IntoValue for SmallVec<[T; N]> {
     }
 }
 
+impl<T: IntoValue + Clone> IntoValue for EcoVec<T> {
+    fn into_value(self) -> Value {
+        Value::Array(self.into_iter().map(IntoValue::into_value).collect())
+    }
+}
+
 impl<T: FromValue> FromValue for Vec<T> {
     fn from_value(value: Value) -> HintedStrResult<Self> {
         value.cast::<Array>()?.into_iter().map(Value::cast).collect()

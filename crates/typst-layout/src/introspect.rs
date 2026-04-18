@@ -8,9 +8,9 @@ use typst_library::diag::StrResult;
 use typst_library::foundations::{Content, Label, Selector};
 use typst_library::introspection::{
     DocumentPosition, ElementIntrospector, ElementIntrospectorBuilder, Introspector,
-    Location, PagedPosition,
+    Location, PagedPosition, Tag,
 };
-use typst_library::layout::{Frame, FrameItem, Point, Transform};
+use typst_library::layout::{Abs, Frame, FrameItem, Point, Transform};
 use typst_library::model::{Destination, Numbering};
 use typst_syntax::VirtualPath;
 use typst_utils::NonZeroExt;
@@ -36,25 +36,14 @@ impl PagedIntrospector {
     /// Creates an introspector for a paged document.
     #[typst_macros::time(name = "introspect pages")]
     pub fn new(pages: &[Page]) -> PagedIntrospector {
-        let mut builder = PagedIntrospectorBuilder::default();
-        let mut page_numberings = Vec::with_capacity(pages.len());
-        let mut page_supplements = Vec::with_capacity(pages.len());
+        let element_hint = pages.len().saturating_mul(15);
+        let mut builder = PagedIntrospectorBuilder::with_capacity(element_hint);
 
-        // Discover all elements.
         for (i, page) in pages.iter().enumerate() {
-            let nr = NonZeroUsize::new(1 + i).unwrap();
-            page_numberings.push(page.numbering.clone());
-            page_supplements.push(page.supplement.clone());
-            builder.discover_frame(&page.frame, Transform::identity(), &mut |point| {
-                PagedPosition { page: nr, point }
-            });
+            builder.discover_page(i, page);
         }
 
-        builder.finish(
-            NonZeroUsize::new(pages.len()).unwrap_or(NonZeroUsize::ONE),
-            page_numberings,
-            page_supplements,
-        )
+        builder.finish_incremental(pages.len())
     }
 
     /// Resolves the position of the location in the pages.
@@ -71,6 +60,13 @@ impl PagedIntrospector {
     /// `FrameItem::Link`.
     pub fn frame_link_targets(&self) -> &FxHashSet<Location> {
         &self.frame_link_targets
+    }
+
+    /// Strip heavy Content from the introspector to free memory before
+    /// PDF export. Elements matching `predicate` are replaced with empty
+    /// Content, freeing their subtrees while preserving position data.
+    pub fn strip_content(&mut self, predicate: impl FnMut(&Content) -> bool) {
+        self.elements.strip_content(predicate);
     }
 }
 
@@ -150,28 +146,67 @@ impl Debug for PagedIntrospector {
     }
 }
 
-/// Builds the introspector.
+/// Builds the introspector incrementally.
+/// Public so that `layout_pages_streaming` can build introspection data
+/// as pages are produced, without keeping all pages in memory.
 #[derive(Default)]
-struct PagedIntrospectorBuilder {
+pub struct PagedIntrospectorBuilder {
     elements: ElementIntrospectorBuilder<PagedPosition>,
     frame_link_targets: FxHashSet<Location>,
+    /// Accumulated page numberings for incremental building.
+    page_numberings: Vec<Option<Numbering>>,
+    /// Accumulated page supplements for incremental building.
+    page_supplements: Vec<Content>,
 }
 
 impl PagedIntrospectorBuilder {
-    /// Build a complete introspector with all acceleration structures from a
-    /// list of top-level pairs.
-    fn finish(
-        self,
-        pages: NonZeroUsize,
-        page_numberings: Vec<Option<Numbering>>,
-        page_supplements: Vec<Content>,
-    ) -> PagedIntrospector {
+    /// Discovers introspectibles in a single page and records its metadata.
+    /// Call this for each page as it's produced during layout, then call
+    /// `finish_incremental` when all pages have been discovered.
+    /// Discovers introspectibles in a single page and records its metadata.
+    pub fn discover_page(&mut self, page_index: usize, page: &Page) {
+        let nr = NonZeroUsize::new(1 + page_index).unwrap();
+        self.page_numberings.push(page.numbering.clone());
+        self.page_supplements.push(page.supplement.clone());
+        self.discover_frame(&page.frame, Transform::identity(), &mut |point| {
+            PagedPosition { page: nr, point }
+        });
+    }
+
+    /// Finishes building the introspector after all pages have been discovered.
+    pub fn finish_incremental(self, total_pages: usize) -> PagedIntrospector {
+        let page_numberings = self.page_numberings;
+        let page_supplements = self.page_supplements;
         PagedIntrospector {
             elements: self.elements.finalize(),
             frame_link_targets: self.frame_link_targets,
-            pages,
+            pages: NonZeroUsize::new(total_pages).unwrap_or(NonZeroUsize::ONE),
             page_numberings,
             page_supplements,
+        }
+    }
+
+    pub fn with_capacity(hint: usize) -> Self {
+        Self {
+            elements: ElementIntrospectorBuilder::with_capacity(hint),
+            frame_link_targets: FxHashSet::default(),
+            page_numberings: Vec::new(),
+            page_supplements: Vec::new(),
+        }
+    }
+
+    /// Discovers remaining tags that arrive after all pages have been produced.
+    /// These tags are logically at the bottom of the last page.
+    pub fn discover_remaining_tags(
+        &mut self,
+        page_index: usize,
+        tags: &[Tag],
+        page_height: Abs,
+    ) {
+        let nr = NonZeroUsize::new(1 + page_index).unwrap();
+        let pos = PagedPosition { page: nr, point: Point::with_y(page_height) };
+        for tag in tags {
+            self.elements.discover_tag(tag, pos);
         }
     }
 

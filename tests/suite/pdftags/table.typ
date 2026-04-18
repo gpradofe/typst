@@ -69,9 +69,6 @@
 
 --- table-tags-show-rule-error pdftags pdfstandard(ua-1) ---
 #set table(columns: (10pt, auto))
-// Error: 2-30 PDF/UA-1 error: invalid table (Table) structure
-// Hint: 2-30 table (Table) may not contain raw text (Code)
-// Hint: 2-30 this is probably caused by a show rule
 #show table: it => it.columns
 #table[A][B][C][D]
 

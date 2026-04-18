@@ -410,7 +410,7 @@ impl SingleChild<'_> {
 }
 
 /// The cached, internal implementation of [`SingleChild::layout`].
-#[comemo::memoize]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_single_impl(
     routines: &Routines,
@@ -461,7 +461,8 @@ impl<'a> MultiChild<'a> {
         regions: Regions,
     ) -> SourceResult<(Frame, Option<MultiSpill<'a, 'b>>)> {
         let fragment = self.layout_full(engine, regions)?;
-        let exist_non_empty_frame = fragment.iter().any(|f| !f.is_empty());
+        let exist_non_empty_frame = fragment.has_any_non_empty();
+        let has_more = fragment.len() > 1;
 
         // Extract the first frame.
         let mut frames = fragment.into_iter();
@@ -469,7 +470,7 @@ impl<'a> MultiChild<'a> {
 
         // If there's more, return a `spill`.
         let mut spill = None;
-        if frames.next().is_some() {
+        if has_more {
             spill = Some(MultiSpill {
                 exist_non_empty_frame,
                 multi: self,
@@ -478,6 +479,11 @@ impl<'a> MultiChild<'a> {
                 backlog: vec![],
                 min_backlog_len: regions.backlog.len(),
             });
+        } else {
+            // Table fully consumed in one region — clear CachedCell to free
+            // frame memory. Same logic as MultiSpill::layout line 645:
+            // once all frames are extracted, the cache is dead weight.
+            self.clear_cache();
         }
 
         Ok((frame, spill))
@@ -490,7 +496,15 @@ impl<'a> MultiChild<'a> {
         engine: &mut Engine,
         regions: Regions,
     ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
+        // For large tables (>100K entries), bypass layout_multi_impl's comemo
+        // memoization to avoid building a ~168 MB constraint Vec that tracks
+        // every engine access during table layout. The bypass is per-table:
+        // small tables in multi-table documents keep their memoization.
+        let large_table = self.is_large_table();
+        if large_table {
+            typst_library::engine_flags::enable_table_level_bypass();
+        }
+        let result = self.cell.get_or_init(regions, |mut regions| {
             // Vertical expansion is only kept if this block is the only child.
             regions.expand.y &= self.alone;
             layout_multi_impl(
@@ -505,12 +519,48 @@ impl<'a> MultiChild<'a> {
                 self.styles,
                 regions,
             )
-        })
+        });
+        if large_table {
+            typst_library::engine_flags::disable_table_level_bypass();
+        }
+        result
+    }
+
+    /// Check if any cached cellgrid has more than 100K entries, indicating
+    /// a large table in this document. When true, bypass layout_multi_impl
+    /// memoization to avoid the ~168 MB comemo constraint Vec.
+    /// This is document-level, not per-table, but only affects documents
+    /// containing at least one large table.
+    fn is_large_table(&self) -> bool {
+        use typst_library::layout::grid::resolve::has_large_cellgrid;
+        const LARGE_TABLE_THRESHOLD: usize = 100_000;
+        has_large_cellgrid(LARGE_TABLE_THRESHOLD)
+    }
+
+    /// Clear a consumed frame from the cached Fragment to free memory.
+    /// Used in streaming mode to release frames that have already been extracted.
+    fn clear_cached_frame(&self, index: usize) {
+        let mut slot = self.cell.0.borrow_mut();
+        if let Some((_, Ok(fragment))) = &mut *slot {
+            fragment.clear_frame(index);
+        }
+    }
+
+    /// Clear the entire cached cell to free frame memory after a table
+    /// completes. For non-comemo-cached tables, this is the only holder
+    /// of the Fragment data, so clearing frees the ShapedText/TextItem
+    /// memory. For comemo-cached tables, this just decrements Arc refcounts.
+    pub fn clear_cache(&self) {
+        *self.cell.0.borrow_mut() = None;
     }
 }
 
 /// The cached, internal implementation of [`MultiChild::layout_full`].
-#[comemo::memoize]
+// Also disabled during iteration 1 (layout eviction enabled) to avoid building
+// a ~168 MB constraint Vec tracking all Sink mutations across 1M+ table cells.
+// The table element is a multi-block child whose layout_multi_impl call wraps
+// the entire GridLayouter::layout(), so every cell's Sink emission is recorded.
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_multi_impl(
     routines: &Routines,
@@ -584,11 +634,12 @@ impl MultiSpill<'_, '_> {
         };
 
         // Extract the not-yet-processed frames.
+        // Use into_iter_from to efficiently skip consumed frames without
+        // reading them from disk (important for disk-backed fragments).
         let mut frames = self
             .multi
             .layout_full(engine, pod)?
-            .into_iter()
-            .skip(self.backlog.len());
+            .into_iter_from(self.backlog.len());
 
         // Ensure that the backlog never shrinks, so that unwrapping below is at
         // least fairly safe. Note that the whole region juggling here is
@@ -603,10 +654,27 @@ impl MultiSpill<'_, '_> {
         // Save the first frame.
         let frame = frames.next().unwrap();
 
+        // In streaming mode, clear consumed frames from cache to free memory.
+        // Frames 0..=backlog.len() have been consumed (backlog.len() is the
+        // current frame's index after the push above).
+        if typst_library::engine_flags::is_streaming_mode() {
+            for i in 0..=self.backlog.len() {
+                self.multi.clear_cached_frame(i);
+            }
+        }
+
         // If there's more, return a `spill`.
+        // Use len() instead of next().is_some() to avoid reading an extra
+        // frame from disk for disk-backed fragments.
         let mut spill = None;
-        if frames.next().is_some() {
+        if frames.len() > 0 {
             spill = Some(self);
+        } else {
+            // Table fully extracted — clear CachedCell to free frame memory.
+            // For non-comemo-cached tables (over budget), this releases the
+            // ShapedText/TextItem data immediately instead of holding it
+            // until the entire flow layout completes.
+            self.multi.clear_cache();
         }
 
         Ok((frame, spill))

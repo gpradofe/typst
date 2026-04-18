@@ -1,6 +1,9 @@
+use std::cell::RefCell;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use rustc_hash::FxHashMap;
 
 use ecow::eco_format;
 use typst_library::Dir;
@@ -8,7 +11,9 @@ use typst_library::diag::{
     At, Hint, HintedStrResult, HintedString, SourceResult, Trace, Tracepoint, bail,
 };
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, Fold, Packed, Smart, StyleChain};
+use typst_library::foundations::{
+    Content, Element, Fold, Packed, Selector, Smart, StyleChain, Target, TargetElem,
+};
 use typst_library::layout::{
     Abs, Alignment, Axes, Celled, GridCell, GridChild, GridElem, GridItem, Length,
     OuterHAlignment, OuterVAlignment, Rel, ResolvedCelled, Sides, Sizing,
@@ -21,6 +26,213 @@ use typst_syntax::Span;
 use typst_utils::{NonZeroExt, SmallBitSet};
 
 use crate::pdf::{TableCellKind, TableHeaderScope};
+
+/// Check if the Packed cell wrapper is needed. Returns true if:
+/// - The output target is HTML (HTML export needs cell elements for structure), or
+/// - User show rules target this cell element type.
+fn needs_packed_cell(styles: StyleChain, cell_elem: Element) -> bool {
+    // HTML export requires Packed<TableCell/GridCell> for table structure.
+    if styles.get(TargetElem::target) != Target::Paged {
+        return true;
+    }
+    styles.recipes().any(|recipe| {
+        recipe
+            .selector()
+            .is_some_and(|sel| selector_may_target(sel, cell_elem))
+    })
+}
+
+fn selector_may_target(selector: &Selector, target: Element) -> bool {
+    match selector {
+        Selector::Elem(elem, _) => *elem == target,
+        Selector::Or(sels) | Selector::And(sels) => {
+            sels.iter().any(|s| selector_may_target(s, target))
+        }
+        Selector::Before { selector, .. }
+        | Selector::After { selector, .. }
+        | Selector::Within { selector, .. } => selector_may_target(selector, target),
+        _ => false,
+    }
+}
+
+thread_local! {
+    /// Cache for `Stroke<Abs>` to `Arc<Stroke<Length>>` conversions.
+    /// Keyed by value hash of the source stroke. Cleared at the start of each
+    /// `resolve_cellgrid` call to prevent cross-compilation leaks.
+    static STROKE_CONV_CACHE: RefCell<FxHashMap<u128, Arc<Stroke>>> =
+        RefCell::new(FxHashMap::default());
+
+    /// Cache for resolved inset values, keyed by value hash.
+    /// Most cells share the same inset, so this deduplicates ~100K
+    /// allocations into just a few Arc-shared instances.
+    #[allow(clippy::type_complexity)]
+    static INSET_CACHE: RefCell<FxHashMap<u128, Arc<Sides<Option<Rel<Length>>>>>> =
+        RefCell::new(FxHashMap::default());
+
+    /// Cache for full stroke Sides, keyed by value hash.
+    /// Deduplicates identical stroke patterns across cells, saving 24 bytes/cell
+    /// (32 bytes inline → 8 bytes Arc). For 1M cells this saves ~24 MB.
+    #[allow(clippy::type_complexity)]
+    static FULL_STROKE_CACHE: RefCell<FxHashMap<u128, Arc<Sides<Option<Arc<Stroke<Abs>>>>>>> =
+        RefCell::new(FxHashMap::default());
+}
+
+/// Global CellGrid cache, shared across all threads. Uses Mutex so
+/// `clear_cellgrid_cache()` can free memory regardless of which thread
+/// populated the cache (rayon worker threads may differ from main thread).
+fn cellgrid_cache() -> &'static Mutex<FxHashMap<u128, Arc<CellGrid>>> {
+    static CACHE: OnceLock<Mutex<FxHashMap<u128, Arc<CellGrid>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Maximum number of CellGrid entries to keep in cache.
+/// Each entry is ~96 KB for a 458-row table. 30 entries ≈ 2.9 MB.
+/// Cache is cleared between compilations by clear_cellgrid_cache().
+const MAX_CELLGRID_CACHE: usize = 30;
+
+/// Clear the CellGrid cache. Call between compilations to prevent stale data.
+/// Unlike the old thread-local version, this clears the single global cache
+/// so entries from rayon worker threads are freed too.
+pub fn clear_cellgrid_cache() {
+    cellgrid_cache().lock().unwrap().clear();
+}
+
+/// Returns true if any cached cellgrid has at least `threshold` entries.
+/// Used to decide whether to evict comemo caches after realization.
+pub fn has_large_cellgrid(threshold: usize) -> bool {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.values().any(|grid| grid.entries.len() >= threshold)
+}
+
+/// Returns the entry count for a cached CellGrid by key.
+/// Returns 0 if the key is not in the cache.
+pub fn cellgrid_entry_count(key: u128) -> usize {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.get(&key).map_or(0, |grid| grid.entries.len())
+}
+
+/// Returns the total number of entries across all cached cellgrids.
+/// Available after realization (when grids are populated) and before layout.
+pub fn total_cellgrid_entries() -> usize {
+    let cache = cellgrid_cache().lock().unwrap();
+    cache.values().map(|grid| grid.entries.len()).sum()
+}
+
+/// Look up or compute a CellGrid for a table element.
+/// Returns (grid, cache_key) so the key can be stored on the element
+/// for later lookup in layout_table (where materialize has changed the
+/// element hash).
+pub fn cached_table_cellgrid(
+    elem: &Packed<TableElem>,
+    engine: &mut Engine,
+    styles: StyleChain,
+) -> SourceResult<(Arc<CellGrid>, u128)> {
+    let hash = typst_utils::hash128(elem.as_ref());
+    // Also include styles in the hash since they affect cell resolution.
+    let style_hash = typst_utils::hash128(&styles);
+    let key = hash ^ style_hash;
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
+            return Ok((grid.clone(), key));
+        }
+    }
+    let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    // Track cumulative entries during realization so layout_pages_streaming
+    // can decide the layout strategy before the grid layouter runs.
+    crate::engine_flags::add_grid_entries(grid.entries.len());
+    // Evict comemo closure caches after cell resolution for large tables.
+    // For multi-table documents with many small tables (< 15K accumulated),
+    // skip eviction entirely to avoid repeated HeapCompact calls — each
+    // costs a few ms and thousands of small tables add up to many seconds.
+    if crate::engine_flags::is_layout_eviction_enabled() {
+        if grid.entries.len() >= 50_000 {
+            comemo::evict(0);
+            crate::engine_flags::compact_heap_and_trim_ws_full();
+        } else if total_cellgrid_entries() >= 15_000 {
+            // Mid-size: evict caches but skip expensive heap compaction.
+            // The next realization will free old memory naturally.
+            comemo::evict(0);
+        }
+    }
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok((grid, key))
+}
+
+/// Look up a CellGrid by a previously stored cache key.
+/// Falls back to full computation if the key isn't in the cache.
+pub fn cellgrid_by_key(
+    key: u128,
+    elem: &Packed<TableElem>,
+    engine: &mut Engine,
+    styles: StyleChain,
+) -> SourceResult<Arc<CellGrid>> {
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
+            let grid = grid.clone();
+            drop(cache);
+            // Evict comemo on cache hit too — during layout, CellGrids are
+            // cached from synthesize, so eviction only on cache miss would
+            // never trigger. Between tables, closure caches and shaping
+            // accumulate; evict them here. For small tables, skip the
+            // expensive HeapCompact/WS trim since it runs per-table.
+            if crate::engine_flags::is_layout_eviction_enabled() {
+                if grid.entries.len() >= 50_000 {
+                    comemo::evict(0);
+                    crate::engine_flags::compact_heap_and_trim_ws_full();
+                } else if total_cellgrid_entries() >= 15_000 {
+                    comemo::evict(0);
+                }
+            }
+            return Ok(grid);
+        }
+    }
+    // Key evicted or never stored — recompute.
+    let grid = Arc::new(table_to_cellgrid(elem, engine, styles)?);
+    if crate::engine_flags::is_layout_eviction_enabled() {
+        if grid.entries.len() >= 50_000 {
+            comemo::evict(0);
+            crate::engine_flags::compact_heap_and_trim_ws_full();
+        } else if total_cellgrid_entries() >= 15_000 {
+            comemo::evict(0);
+        }
+    }
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok(grid)
+}
+
+/// Look up or compute a CellGrid for a grid element.
+pub fn cached_grid_cellgrid(
+    elem: &Packed<GridElem>,
+    engine: &mut Engine,
+    styles: StyleChain,
+) -> SourceResult<Arc<CellGrid>> {
+    let hash = typst_utils::hash128(elem.as_ref());
+    let style_hash = typst_utils::hash128(&styles);
+    let key = hash ^ style_hash;
+    {
+        let cache = cellgrid_cache().lock().unwrap();
+        if let Some(grid) = cache.get(&key) {
+            return Ok(grid.clone());
+        }
+    }
+    let grid = Arc::new(grid_to_cellgrid(elem, engine, styles)?);
+    let mut cache = cellgrid_cache().lock().unwrap();
+    if cache.len() >= MAX_CELLGRID_CACHE {
+        cache.clear();
+    }
+    cache.insert(key, grid.clone());
+    Ok(grid)
+}
 
 /// Convert a grid to a cell grid.
 #[typst_macros::time(span = elem.span())]
@@ -197,12 +409,18 @@ fn table_item_to_resolvable(
             },
         },
         TableItem::Cell(cell) => ResolvableGridItem::Cell(cell.clone()),
+        TableItem::BodyOnly(body, span) => {
+            // Create Packed<TableCell> on-the-fly. The iterator is lazy, so
+            // only ONE cell wrapper exists at a time instead of all 1M.
+            let cell = Packed::new(TableCell::new(body.clone())).spanned(*span);
+            ResolvableGridItem::Cell(cell)
+        }
     }
 }
 
 impl ResolvableCell for Packed<TableCell> {
     fn resolve_cell(
-        mut self,
+        self,
         x: usize,
         y: usize,
         fill: &Option<Paint>,
@@ -213,15 +431,14 @@ impl ResolvableCell for Packed<TableCell> {
         styles: StyleChain,
         kind: Smart<TableCellKind>,
     ) -> Cell {
-        let cell = &mut *self;
-        let colspan = cell.colspan.get(styles);
-        let rowspan = cell.rowspan.get(styles);
-        let breakable = cell.breakable.get(styles).unwrap_or(breakable);
-        let fill = cell.fill.get_cloned(styles).unwrap_or_else(|| fill.clone());
+        // READ phase: all through Deref (immutable, no make_unique)
+        let colspan = self.colspan.get(styles);
+        let rowspan = self.rowspan.get(styles);
+        let breakable = self.breakable.get(styles).unwrap_or(breakable);
+        let fill = self.fill.get_cloned(styles).unwrap_or_else(|| fill.clone());
+        let kind = self.kind.get(styles).or(kind);
 
-        let kind = cell.kind.get(styles).or(kind);
-
-        let cell_stroke = cell.stroke.resolve(styles);
+        let cell_stroke = self.stroke.resolve(styles);
         let stroke_overridden =
             cell_stroke.as_ref().map(|side| matches!(side, Some(Some(_))));
 
@@ -234,45 +451,97 @@ impl ResolvableCell for Packed<TableCell> {
         // In the end, we flatten because, for layout purposes, an unspecified
         // cell stroke is the same as specifying 'none', so we equate the two
         // concepts.
-        let stroke = cell_stroke.fold(stroke).map(Option::flatten);
-        cell.x.set(Smart::Custom(x));
-        cell.y.set(Smart::Custom(y));
-        cell.fill.set(Smart::Custom(fill.clone()));
-        cell.align.set(match align {
+        let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
+        // Arc-share identical stroke patterns via hash cache.
+        let stroke_hash = typst_utils::hash128(&(
+            &stroke_sides.top,
+            &stroke_sides.right,
+            &stroke_sides.bottom,
+            &stroke_sides.left,
+        ));
+        let stroke = FULL_STROKE_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(stroke_hash)
+                .or_insert_with(|| Arc::new(stroke_sides))
+                .clone()
+        });
+
+        let resolved_align = match align {
             Smart::Custom(align) => Smart::Custom(
-                cell.align.get(styles).map_or(align, |inner| inner.fold(align)),
+                self.align.get(styles).map_or(align, |inner| inner.fold(align)),
             ),
             // Don't fold if the table is using outer alignment. Use the
             // cell's alignment instead (which, in the end, will fold with
             // the outer alignment when it is effectively displayed).
-            Smart::Auto => cell.align.get(styles),
-        });
-        cell.inset.set(Smart::Custom(
-            cell.inset.get(styles).map_or(inset, |inner| inner.fold(inset)),
-        ));
-        cell.stroke.set(
-            // Here we convert the resolved stroke to a regular stroke, however
-            // with resolved units (that is, 'em' converted to absolute units).
-            // We also convert any stroke unspecified by both the cell and the
-            // outer stroke ('None' in the folded stroke) to 'none', that is,
-            // all sides are present in the resulting Sides object accessible
-            // by show rules on table cells.
-            stroke.as_ref().map(|side| {
-                Some(side.as_ref().map(|cell_stroke| {
-                    Arc::new((**cell_stroke).clone().map(Length::from))
-                }))
-            }),
-        );
-        cell.breakable.set(Smart::Custom(breakable));
-        cell.kind.set(kind);
+            Smart::Auto => self.align.get(styles),
+        };
+        let computed_inset =
+            self.inset.get(styles).map_or(inset, |inner| inner.fold(inset));
+        // CONSTRUCT phase: if no user show rules target table.cell, skip
+        // the Packed<TableCell> allocation entirely. Inset/align will be
+        // applied on-the-fly in layout_cell, keeping cell.body lightweight.
+        let source_span = self.span();
+        let (body, apply_inset_align, cell_resolved_inset) =
+            if needs_packed_cell(styles, Element::of::<TableCell>()) {
+                // User show rules exist: keep Packed wrapper for matching.
+                // Clone the Arc'd stroke Sides for the converted_stroke.
+                let converted_stroke = (*stroke).clone().map(|side| {
+                    Some(side.as_ref().map(|cell_stroke| {
+                        let hash = typst_utils::hash128(&**cell_stroke);
+                        STROKE_CONV_CACHE.with(|cache| {
+                            cache
+                                .borrow_mut()
+                                .entry(hash)
+                                .or_insert_with(|| {
+                                    Arc::new((**cell_stroke).clone().map(Length::from))
+                                })
+                                .clone()
+                        })
+                    }))
+                });
+                let body = self.body.clone();
+                let new_cell = TableCell::new(body)
+                    .with_x(Smart::Custom(x))
+                    .with_y(Smart::Custom(y))
+                    .with_colspan(colspan)
+                    .with_rowspan(rowspan)
+                    .with_fill(Smart::Custom(fill.clone()))
+                    .with_align(resolved_align)
+                    .with_inset(Smart::Custom(computed_inset))
+                    .with_stroke(converted_stroke)
+                    .with_breakable(Smart::Custom(breakable))
+                    .with_kind(kind);
+                // Packed cell carries inset; don't duplicate in Cell.
+                (Packed::new(new_cell).spanned(source_span).pack(), false, None)
+            } else {
+                // No user show rules: store raw body. Inset/align applied
+                // on-the-fly in layout_cell from resolved_inset/resolved_align.
+                // Arc-share inset via hash cache.
+                let inset_hash = typst_utils::hash128(&computed_inset);
+                let inset_arc = INSET_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entry(inset_hash)
+                        .or_insert_with(|| Arc::new(computed_inset))
+                        .clone()
+                });
+                (self.body.clone(), true, Some(inset_arc))
+            };
+
         Cell {
-            body: self.pack(),
-            fill,
-            colspan,
-            rowspan,
+            body,
+            fill: fill.map(Box::new),
+            colspan: NonZeroU32::try_from(colspan).unwrap_or(NonZeroU32::MIN),
+            rowspan: NonZeroU32::try_from(rowspan).unwrap_or(NonZeroU32::MIN),
             stroke,
             stroke_overridden,
             breakable,
+            resolved_inset: cell_resolved_inset,
+            resolved_align,
+            apply_inset_align,
+            source: Some(CellSource::Table { cell_x: x as u32, cell_y: y as u32, kind }),
+            source_span,
         }
     }
 
@@ -299,7 +568,7 @@ impl ResolvableCell for Packed<TableCell> {
 
 impl ResolvableCell for Packed<GridCell> {
     fn resolve_cell(
-        mut self,
+        self,
         x: usize,
         y: usize,
         fill: &Option<Paint>,
@@ -310,13 +579,13 @@ impl ResolvableCell for Packed<GridCell> {
         styles: StyleChain,
         _: Smart<TableCellKind>,
     ) -> Cell {
-        let cell = &mut *self;
-        let colspan = cell.colspan.get(styles);
-        let rowspan = cell.rowspan.get(styles);
-        let breakable = cell.breakable.get(styles).unwrap_or(breakable);
-        let fill = cell.fill.get_cloned(styles).unwrap_or_else(|| fill.clone());
+        // READ phase: all through Deref (immutable, no make_unique)
+        let colspan = self.colspan.get(styles);
+        let rowspan = self.rowspan.get(styles);
+        let breakable = self.breakable.get(styles).unwrap_or(breakable);
+        let fill = self.fill.get_cloned(styles).unwrap_or_else(|| fill.clone());
 
-        let cell_stroke = cell.stroke.resolve(styles);
+        let cell_stroke = self.stroke.resolve(styles);
         let stroke_overridden =
             cell_stroke.as_ref().map(|side| matches!(side, Some(Some(_))));
 
@@ -329,44 +598,96 @@ impl ResolvableCell for Packed<GridCell> {
         // In the end, we flatten because, for layout purposes, an unspecified
         // cell stroke is the same as specifying 'none', so we equate the two
         // concepts.
-        let stroke = cell_stroke.fold(stroke).map(Option::flatten);
-        cell.x.set(Smart::Custom(x));
-        cell.y.set(Smart::Custom(y));
-        cell.fill.set(Smart::Custom(fill.clone()));
-        cell.align.set(match align {
+        let stroke_sides = cell_stroke.fold(stroke).map(Option::flatten);
+        // Arc-share identical stroke patterns via hash cache.
+        let stroke_hash = typst_utils::hash128(&(
+            &stroke_sides.top,
+            &stroke_sides.right,
+            &stroke_sides.bottom,
+            &stroke_sides.left,
+        ));
+        let stroke = FULL_STROKE_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(stroke_hash)
+                .or_insert_with(|| Arc::new(stroke_sides))
+                .clone()
+        });
+
+        let resolved_align = match align {
             Smart::Custom(align) => Smart::Custom(
-                cell.align.get(styles).map_or(align, |inner| inner.fold(align)),
+                self.align.get(styles).map_or(align, |inner| inner.fold(align)),
             ),
             // Don't fold if the grid is using outer alignment. Use the
             // cell's alignment instead (which, in the end, will fold with
             // the outer alignment when it is effectively displayed).
-            Smart::Auto => cell.align.get(styles),
-        });
-        cell.inset.set(Smart::Custom(
-            cell.inset.get(styles).map_or(inset, |inner| inner.fold(inset)),
-        ));
-        cell.stroke.set(
-            // Here we convert the resolved stroke to a regular stroke, however
-            // with resolved units (that is, 'em' converted to absolute units).
-            // We also convert any stroke unspecified by both the cell and the
-            // outer stroke ('None' in the folded stroke) to 'none', that is,
-            // all sides are present in the resulting Sides object accessible
-            // by show rules on grid cells.
-            stroke.as_ref().map(|side| {
-                Some(side.as_ref().map(|cell_stroke| {
-                    Arc::new((**cell_stroke).clone().map(Length::from))
-                }))
-            }),
-        );
-        cell.breakable.set(Smart::Custom(breakable));
+            Smart::Auto => self.align.get(styles),
+        };
+        let computed_inset =
+            self.inset.get(styles).map_or(inset, |inner| inner.fold(inset));
+        // CONSTRUCT phase: if no user show rules target grid.cell, skip
+        // the Packed<GridCell> allocation entirely. Inset/align will be
+        // applied on-the-fly in layout_cell, keeping cell.body lightweight.
+        let source_span = self.span();
+        let (body, apply_inset_align, cell_resolved_inset) =
+            if needs_packed_cell(styles, Element::of::<GridCell>()) {
+                // User show rules exist: keep Packed wrapper for matching.
+                // Clone the Arc'd stroke Sides for the converted_stroke.
+                let converted_stroke = (*stroke).clone().map(|side| {
+                    Some(side.as_ref().map(|cell_stroke| {
+                        let hash = typst_utils::hash128(&**cell_stroke);
+                        STROKE_CONV_CACHE.with(|cache| {
+                            cache
+                                .borrow_mut()
+                                .entry(hash)
+                                .or_insert_with(|| {
+                                    Arc::new((**cell_stroke).clone().map(Length::from))
+                                })
+                                .clone()
+                        })
+                    }))
+                });
+                let body = self.body.clone();
+                let new_cell = GridCell::new(body)
+                    .with_x(Smart::Custom(x))
+                    .with_y(Smart::Custom(y))
+                    .with_colspan(colspan)
+                    .with_rowspan(rowspan)
+                    .with_fill(Smart::Custom(fill.clone()))
+                    .with_align(resolved_align)
+                    .with_inset(Smart::Custom(computed_inset))
+                    .with_stroke(converted_stroke)
+                    .with_breakable(Smart::Custom(breakable));
+                // Packed cell carries inset; don't duplicate in Cell.
+                (Packed::new(new_cell).spanned(source_span).pack(), false, None)
+            } else {
+                // No user show rules: store raw body. Inset/align applied
+                // on-the-fly in layout_cell from resolved_inset/resolved_align.
+                // Arc-share inset via hash cache.
+                let inset_hash = typst_utils::hash128(&computed_inset);
+                let inset_arc = INSET_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entry(inset_hash)
+                        .or_insert_with(|| Arc::new(computed_inset))
+                        .clone()
+                });
+                (self.body.clone(), true, Some(inset_arc))
+            };
+
         Cell {
-            body: self.pack(),
-            fill,
-            colspan,
-            rowspan,
+            body,
+            fill: fill.map(Box::new),
+            colspan: NonZeroU32::try_from(colspan).unwrap_or(NonZeroU32::MIN),
+            rowspan: NonZeroU32::try_from(rowspan).unwrap_or(NonZeroU32::MIN),
             stroke,
             stroke_overridden,
             breakable,
+            resolved_inset: cell_resolved_inset,
+            resolved_align,
+            apply_inset_align,
+            source: Some(CellSource::Grid { cell_x: x as u32, cell_y: y as u32 }),
+            source_span,
         }
     }
 
@@ -393,7 +714,7 @@ impl ResolvableCell for Packed<GridCell> {
 
 /// Represents an explicit grid line (horizontal or vertical) specified by the
 /// user.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Line {
     /// The index of the track after this line. This will be the index of the
     /// row a horizontal line is above of, or of the column right after a
@@ -423,7 +744,7 @@ pub struct Line {
 }
 
 /// A repeatable grid header. Starts at the first row.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Header {
     /// The range of rows included in this header.
     pub range: Range<usize>,
@@ -442,7 +763,7 @@ pub struct Header {
 }
 
 /// A repeatable grid footer. Stops at the last row.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Footer {
     /// The first row included in this footer.
     pub start: usize,
@@ -467,7 +788,7 @@ impl Footer {
 /// It still exists even when not repeatable, but must not have additional
 /// considerations by grid layout, other than for consistency (such as making
 /// a certain group of rows unbreakable).
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Repeatable<T> {
     inner: T,
 
@@ -567,22 +888,51 @@ pub enum ResolvableGridItem<T: ResolvableCell> {
     Cell(T),
 }
 
+/// Indicates whether a cell originated from a table or grid element.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub enum CellSource {
+    /// The cell came from a table element. Stores resolved properties needed
+    /// for PDF tagging (x, y, kind). Uses u32 to save 8 bytes per cell.
+    Table {
+        /// The cell's column index.
+        cell_x: u32,
+        /// The cell's row index.
+        cell_y: u32,
+        /// The cell's kind (header/footer/data) for PDF accessibility.
+        kind: Smart<TableCellKind>,
+    },
+    /// The cell came from a grid element. Stores resolved position for tags.
+    Grid {
+        /// The cell's column index.
+        cell_x: u32,
+        /// The cell's row index.
+        cell_y: u32,
+    },
+}
+
 /// Represents a cell in CellGrid, to be laid out by GridLayouter.
 #[derive(Debug, PartialEq, Hash)]
 pub struct Cell {
-    /// The cell's body.
+    /// The cell's body content, wrapped in `Packed<TableCell>` or
+    /// `Packed<GridCell>` for show rule support. The resolved fields below
+    /// are used by layout_cell for lightweight tag generation.
     pub body: Content,
-    /// The cell's fill.
-    pub fill: Option<Paint>,
-    /// The amount of columns spanned by the cell.
-    pub colspan: NonZeroUsize,
-    /// The amount of rows spanned by the cell.
-    pub rowspan: NonZeroUsize,
+    /// The cell's fill. Boxed to save 16 bytes per cell (`Option<Paint>` is
+    /// 24 bytes, `Option<Box<Paint>>` is 8 bytes). For 1M cells this saves
+    /// ~16 MB.
+    pub fill: Option<Box<Paint>>,
+    /// The amount of columns spanned by the cell. Uses u32 instead of usize
+    /// to save 4 bytes per cell (~4 MB for 1M cells). Max colspan is well
+    /// under 2^32.
+    pub colspan: NonZeroU32,
+    /// The amount of rows spanned by the cell. Uses u32 for same reason.
+    pub rowspan: NonZeroU32,
     /// The cell's stroke.
     ///
-    /// We use an Arc to avoid unnecessary space usage when all sides are the
-    /// same, or when the strokes come from a common source.
-    pub stroke: Sides<Option<Arc<Stroke<Abs>>>>,
+    /// Arc-shared across cells with the same stroke pattern to save 24 bytes
+    /// per cell (32 bytes inline → 8 bytes Arc). For 1M cells: ~24 MB savings.
+    /// Individual sides also use Arc to deduplicate identical strokes.
+    pub stroke: Arc<Sides<Option<Arc<Stroke<Abs>>>>>,
     /// Which stroke sides were explicitly overridden by the cell, over the
     /// grid's global stroke setting.
     ///
@@ -595,7 +945,27 @@ pub struct Cell {
     /// By default, a cell spanning only fixed-size rows is unbreakable, while
     /// a cell spanning at least one `auto`-sized row is breakable.
     pub breakable: bool,
+    /// The resolved inset for this cell (from table/grid inset + cell override).
+    /// Only populated when apply_inset_align is true (no user show rules).
+    /// Arc-shared via hash cache to deduplicate identical values across cells.
+    pub resolved_inset: Option<Arc<Sides<Option<Rel<Length>>>>>,
+    /// The resolved alignment for this cell.
+    /// Stored here for potential future use; currently still applied via show rule.
+    pub resolved_align: Smart<Alignment>,
+    /// Whether layout_cell should apply inset/align on-the-fly from
+    /// resolved_inset/resolved_align. True when no user show rules exist
+    /// (body is raw content, not wrapped in Packed<TableCell/GridCell>).
+    pub apply_inset_align: bool,
+    /// Where the cell came from (table or grid), with position info for tags.
+    pub source: Option<CellSource>,
+    /// The span of the original cell element (for locator/tracing).
+    pub source_span: Span,
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<Cell>() <= 96);
+    assert!(std::mem::size_of::<Entry>() <= 96);
+};
 
 impl Cell {
     /// Create a simple cell given its body.
@@ -603,11 +973,16 @@ impl Cell {
         Self {
             body,
             fill: None,
-            colspan: NonZeroUsize::ONE,
-            rowspan: NonZeroUsize::ONE,
-            stroke: Sides::splat(None),
+            colspan: NonZeroU32::ONE,
+            rowspan: NonZeroU32::ONE,
+            stroke: Arc::new(Sides::splat(None)),
             stroke_overridden: Sides::splat(false),
             breakable: true,
+            resolved_inset: None,
+            resolved_align: Smart::Auto,
+            apply_inset_align: false,
+            source: None,
+            source_span: Span::detached(),
         }
     }
 }
@@ -634,6 +1009,8 @@ pub enum Entry {
         /// The index of the cell this entry is merged with.
         parent: usize,
     },
+    /// An unfilled slot (used during grid resolution, replaced before layout).
+    Empty,
 }
 
 impl Entry {
@@ -641,8 +1018,13 @@ impl Entry {
     pub fn as_cell(&self) -> Option<&Cell> {
         match self {
             Self::Cell(cell) => Some(cell),
-            Self::Merged { .. } => None,
+            Self::Merged { .. } | Self::Empty => None,
         }
+    }
+
+    /// Returns true if this entry is an unfilled empty slot.
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
     }
 }
 
@@ -785,6 +1167,50 @@ impl CellGrid {
         self.entry(x, y).and_then(Entry::as_cell)
     }
 
+    /// Release the body Content of all cells in row `y` that have rowspan == 1.
+    /// This frees the cell's layout content after the row has been fully laid
+    /// out, reducing peak memory for large grids. Cells with rowspan > 1 are
+    /// kept alive for later rowspan layout.
+    ///
+    /// # Safety
+    /// This uses interior mutability to modify cells through a shared reference.
+    /// The caller must ensure no other code holds a reference to the cell body
+    /// being released. This is safe during grid layout because cells are only
+    /// accessed row-by-row, and released rows are never revisited.
+    pub fn release_row_cells(&self, y: usize) {
+        let c = self.non_gutter_column_count();
+        let factor = if self.has_gutter { 2 } else { 1 };
+        for col_idx in 0..c {
+            let x = col_idx * factor;
+            let entry_idx = if self.has_gutter { (y / 2) * c + x / 2 } else { y * c + x };
+            if let Some(Entry::Cell(cell)) = self.entries.get(entry_idx)
+                && cell.rowspan.get() == 1
+            {
+                // SAFETY: During grid layout, once a non-rowspan row is laid out,
+                // its cell bodies are never accessed again (headers/footers are
+                // excluded by the caller). The Content is replaced with a no-alloc
+                // singleton to free memory.
+                unsafe {
+                    let cell_ptr = cell as *const Cell as *mut Cell;
+                    (*cell_ptr).body = Content::empty();
+                }
+            }
+        }
+    }
+
+    /// Release the body Content of a specific cell at position (x, y).
+    /// Uses the same interior mutability approach as release_row_cells.
+    pub fn release_cell(&self, x: usize, y: usize) {
+        let c = self.non_gutter_column_count();
+        let entry_idx = if self.has_gutter { (y / 2) * c + x / 2 } else { y * c + x };
+        if let Some(Entry::Cell(cell)) = self.entries.get(entry_idx) {
+            unsafe {
+                let cell_ptr = cell as *const Cell as *mut Cell;
+                (*cell_ptr).body = Content::empty();
+            }
+        }
+    }
+
     /// Returns the position of the parent cell of the grid entry at the given
     /// position. It is guaranteed to have a non-gutter, non-merged cell at
     /// the returned position, due to how the grid is built.
@@ -801,6 +1227,7 @@ impl CellGrid {
                 let factor = if self.has_gutter { 2 } else { 1 };
                 Axes::new(factor * (*parent % c), factor * (*parent / c))
             }
+            Entry::Empty => unreachable!("empty entry after grid resolution"),
         })
     }
 
@@ -852,14 +1279,16 @@ impl CellGrid {
     /// might span if the grid has gutters.
     #[inline]
     pub fn effective_colspan_of_cell(&self, cell: &Cell) -> usize {
-        if self.has_gutter { 2 * cell.colspan.get() - 1 } else { cell.colspan.get() }
+        let c = cell.colspan.get() as usize;
+        if self.has_gutter { 2 * c - 1 } else { c }
     }
 
     /// Returns the effective rowspan of a cell, considering the gutters it
     /// might span if the grid has gutters.
     #[inline]
     pub fn effective_rowspan_of_cell(&self, cell: &Cell) -> usize {
-        if self.has_gutter { 2 * cell.rowspan.get() - 1 } else { cell.rowspan.get() }
+        let r = cell.rowspan.get() as usize;
+        if self.has_gutter { 2 * r - 1 } else { r }
     }
 
     #[inline]
@@ -898,6 +1327,183 @@ impl CellGrid {
     }
 }
 
+/// Compact cell metadata for PDF tagging. Contains only stroke/fill data,
+/// not the full Content body.
+///
+/// Stroke data is deduplicated: each cell stores a u16 index into
+/// `GridMeta::unique_strokes` instead of the full `Sides<Option<Arc<...>>>`
+/// (32+ bytes → 2 bytes). For 100K-row tables with uniform strokes, this
+/// reduces the entries Vec from ~83 MB to ~14 MB.
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
+pub struct MetaCell {
+    /// Index into `GridMeta::unique_strokes` for this cell's stroke pattern.
+    pub stroke_idx: u16,
+    /// The cell's fill color as pre-converted RGB bytes [r, g, b].
+    /// Only solid colors are stored; gradients and tilings are None.
+    pub fill_rgb: Option<[u8; 3]>,
+}
+
+/// A deduplicated stroke pattern with its overridden flags.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct StrokePattern {
+    /// The cell's stroke sides.
+    pub stroke: Sides<Option<Arc<Stroke<Abs>>>>,
+    /// Which stroke sides were explicitly overridden by the cell.
+    pub stroke_overridden: Sides<bool>,
+}
+
+/// Entry in GridMeta, mirroring CellGrid's Entry but with MetaCell.
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
+pub enum MetaEntry {
+    /// An entry holding compact cell data.
+    Cell(MetaCell),
+    /// An entry merged with another cell.
+    Merged {
+        /// The index of the parent cell (u32 saves 4 bytes vs usize on 64-bit).
+        parent: u32,
+    },
+}
+
+impl MetaEntry {
+    /// Obtains the meta cell inside this entry, if not merged.
+    pub fn as_cell(&self) -> Option<&MetaCell> {
+        match self {
+            Self::Cell(cell) => Some(cell),
+            Self::Merged { .. } => None,
+        }
+    }
+}
+
+/// Compact grid metadata for PDF tagging. Stores only stroke/fill data
+/// per cell plus structural info (headers, footer, lines).
+///
+/// Stroke data is deduplicated via `unique_strokes`. For 100K-row tables
+/// with uniform strokes, there are typically only 1-3 unique stroke
+/// patterns shared across 1M+ cells.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct GridMeta {
+    /// Per-cell metadata, indexed by content coordinates (no gutter).
+    /// Same indexing as CellGrid::entries.
+    pub entries: Vec<MetaEntry>,
+    /// Deduplicated stroke patterns. Each MetaCell stores an index into
+    /// this table. Typically very small (1-10 entries) even for huge tables.
+    pub unique_strokes: Vec<StrokePattern>,
+    /// Number of non-gutter (content) columns. Used for entry indexing.
+    pub content_cols: usize,
+    /// Number of non-gutter (content) rows.
+    pub content_rows: usize,
+    /// Whether the grid has gutters.
+    pub has_gutter: bool,
+    /// The repeatable headers.
+    pub headers: Vec<Repeatable<Header>>,
+    /// The repeatable footer.
+    pub footer: Option<Repeatable<Footer>>,
+    /// Horizontal lines (for PDF explicit line placement).
+    pub hlines: Vec<Vec<Line>>,
+    /// Vertical lines (for PDF explicit line placement).
+    pub vlines: Vec<Vec<Line>>,
+}
+
+impl GridMeta {
+    /// Extract compact metadata from a full CellGrid, discarding cell bodies.
+    /// Deduplicates stroke patterns into `unique_strokes` table.
+    pub fn from_cellgrid(grid: &CellGrid) -> Self {
+        // Build deduplicated stroke table.
+        let mut unique_strokes: Vec<StrokePattern> = Vec::new();
+        // Map from stroke pattern hash to index, for fast lookup.
+        let mut stroke_map: FxHashMap<u64, u16> = FxHashMap::default();
+
+        let entries = grid
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::Cell(cell) => {
+                    // Find or insert the stroke pattern.
+                    let stroke_key =
+                        typst_utils::hash128(&(&cell.stroke, &cell.stroke_overridden))
+                            as u64;
+                    let stroke_idx = *stroke_map.entry(stroke_key).or_insert_with(|| {
+                        let idx = unique_strokes.len() as u16;
+                        unique_strokes.push(StrokePattern {
+                            stroke: (*cell.stroke).clone(),
+                            stroke_overridden: cell.stroke_overridden,
+                        });
+                        idx
+                    });
+
+                    MetaEntry::Cell(MetaCell {
+                        stroke_idx,
+                        fill_rgb: cell.fill.as_deref().and_then(|paint| match paint {
+                            Paint::Solid(color) => {
+                                let c = color.to_rgb();
+                                Some([
+                                    (255.0 * c.red).round() as u8,
+                                    (255.0 * c.green).round() as u8,
+                                    (255.0 * c.blue).round() as u8,
+                                ])
+                            }
+                            _ => None,
+                        }),
+                    })
+                }
+                Entry::Merged { parent } => MetaEntry::Merged { parent: *parent as u32 },
+                Entry::Empty => unreachable!("empty entry after grid resolution"),
+            })
+            .collect();
+
+        Self {
+            entries,
+            unique_strokes,
+            content_cols: grid.non_gutter_column_count(),
+            content_rows: grid.non_gutter_row_count(),
+            has_gutter: grid.has_gutter,
+            headers: grid.headers.clone(),
+            footer: grid.footer.clone(),
+            hlines: grid.hlines.clone(),
+            vlines: grid.vlines.clone(),
+        }
+    }
+
+    /// Number of non-gutter columns.
+    #[inline]
+    pub fn non_gutter_column_count(&self) -> usize {
+        self.content_cols
+    }
+
+    /// Number of non-gutter rows.
+    #[inline]
+    pub fn non_gutter_row_count(&self) -> usize {
+        self.content_rows
+    }
+
+    /// Get a reference to the entry at (x, y) in effective coordinates
+    /// (which may include gutter tracks). Mirrors CellGrid::entry().
+    fn entry(&self, x: usize, y: usize) -> Option<&MetaEntry> {
+        if self.has_gutter {
+            // Even columns and rows are children, odd ones are gutter.
+            if x % 2 == 0 && y % 2 == 0 {
+                self.entries.get((y / 2) * self.content_cols + x / 2)
+            } else {
+                None
+            }
+        } else {
+            self.entries.get(y * self.content_cols + x)
+        }
+    }
+
+    /// Get a reference to the cell at (x, y) in effective coordinates.
+    /// Returns None for gutter, merged, or out-of-bounds entries.
+    pub fn cell(&self, x: usize, y: usize) -> Option<&MetaCell> {
+        self.entry(x, y).and_then(MetaEntry::as_cell)
+    }
+
+    /// Look up the stroke pattern for a meta cell.
+    #[inline]
+    pub fn stroke_pattern(&self, cell: &MetaCell) -> &StrokePattern {
+        &self.unique_strokes[cell.stroke_idx as usize]
+    }
+}
+
 /// Resolves and positions all cells in the grid before creating it.
 /// Allows them to keep track of their final properties and positions
 /// and adjust their fields accordingly.
@@ -923,6 +1529,11 @@ where
     C: IntoIterator<Item = ResolvableGridChild<T, I>>,
     C::IntoIter: ExactSizeIterator,
 {
+    // Clear caches to prevent cross-compilation leaks.
+    STROKE_CONV_CACHE.with(|cache| cache.borrow_mut().clear());
+    INSET_CACHE.with(|cache| cache.borrow_mut().clear());
+    FULL_STROKE_CACHE.with(|cache| cache.borrow_mut().clear());
+
     CellGridResolver {
         tracks,
         gutter,
@@ -1073,6 +1684,12 @@ impl CellGridResolver<'_, '_> {
             bail!(self.span, "too many cells or lines were given")
         };
 
+        // Add extra capacity for colspan cells that create Merged entries
+        // beyond child_count. Without this margin, the Vec doubles when it
+        // overflows (e.g. 1M → 2M entries = 144 MB wasted). A 5% margin
+        // covers typical header/footer rows with colspan.
+        let capacity = child_count + child_count / 20 + columns * 20;
+
         // Rows in this bitset are occupied by an existing header.
         // This allows for efficiently checking whether a cell would collide
         // with a header at a certain row. (For footers, it's easy as there is
@@ -1081,7 +1698,16 @@ impl CellGridResolver<'_, '_> {
         // TODO(subfooters): how to add a footer here while avoiding
         // unnecessary allocations?
         let mut header_rows: SmallBitSet = SmallBitSet::new();
-        let mut resolved_cells: Vec<Option<Entry>> = Vec::with_capacity(child_count);
+        let mut resolved_cells: Vec<Entry> = Vec::with_capacity(capacity);
+
+        // For large grids, periodically evict comemo caches during cell
+        // resolution. The fill/stroke/align/inset closure evaluations are
+        // memoized but each cell has unique arguments, so no cache hits
+        // occur. Without eviction, these caches accumulate to ~594 MB for
+        // 100K-row tables. Evict every 100K children to keep peak bounded.
+        let evict_during_resolve = child_count >= 100_000;
+        let mut children_processed: usize = 0;
+
         for child in children {
             self.resolve_grid_child(
                 columns,
@@ -1096,6 +1722,17 @@ impl CellGridResolver<'_, '_> {
                 &mut at_least_one_cell,
                 child,
             )?;
+
+            if evict_during_resolve {
+                children_processed += 1;
+                if children_processed % 100_000 == 0 {
+                    comemo::evict(0);
+                }
+            }
+        }
+        // Final eviction after all children to clear remaining caches.
+        if evict_during_resolve {
+            comemo::evict(0);
         }
 
         let resolved_cells = self.fixup_cells::<T>(resolved_cells, columns)?;
@@ -1148,7 +1785,7 @@ impl CellGridResolver<'_, '_> {
         footer: &mut Option<(usize, Span, Footer)>,
         repeat_footer: &mut bool,
         auto_index: &mut usize,
-        resolved_cells: &mut Vec<Option<Entry>>,
+        resolved_cells: &mut Vec<Entry>,
         at_least_one_cell: &mut bool,
         child: ResolvableGridChild<T, I>,
     ) -> SourceResult<()>
@@ -1488,7 +2125,7 @@ impl CellGridResolver<'_, '_> {
                 // (they can be overridden later); however, if no cells
                 // occupy them as we finish building the grid, then such
                 // positions will be replaced by empty cells.
-                resolved_cells.resize_with(new_len, || None);
+                resolved_cells.resize_with(new_len, || Entry::Empty);
             }
 
             // The vector is large enough to contain the cell, so we can
@@ -1496,7 +2133,7 @@ impl CellGridResolver<'_, '_> {
             // placed in. However, we still need to ensure we won't try to
             // place a cell where there already is one.
             let slot = &mut resolved_cells[resolved_index];
-            if slot.is_some() {
+            if !slot.is_empty() {
                 bail!(
                     cell_span,
                     "attempted to place a second cell at column {x}, row {y}";
@@ -1504,7 +2141,7 @@ impl CellGridResolver<'_, '_> {
                 );
             }
 
-            *slot = Some(Entry::Cell(cell));
+            *slot = Entry::Cell(cell);
 
             // Now, if the cell spans more than one row or column, we fill
             // the spanned positions in the grid with Entry::Merged
@@ -1520,7 +2157,7 @@ impl CellGridResolver<'_, '_> {
                         // This is the parent cell.
                         continue;
                     }
-                    if slot.is_some() {
+                    if !slot.is_empty() {
                         bail!(
                             cell_span,
                             "cell would span a previously placed cell at column \
@@ -1529,7 +2166,7 @@ impl CellGridResolver<'_, '_> {
                                    reducing the cell's rowspan or colspan";
                         )
                     }
-                    *slot = Some(Entry::Merged { parent: resolved_index });
+                    *slot = Entry::Merged { parent: resolved_index };
                 }
             }
         }
@@ -1549,7 +2186,8 @@ impl CellGridResolver<'_, '_> {
 
                     if resolved_cells.len() <= columns * group_start {
                         // Ensure the automatically chosen row actually exists.
-                        resolved_cells.resize_with(columns * (group_start + 1), || None);
+                        resolved_cells
+                            .resize_with(columns * (group_start + 1), || Entry::Empty);
                     }
 
                     // Even though this header or footer is fully empty, we add one
@@ -1560,7 +2198,7 @@ impl CellGridResolver<'_, '_> {
                     // 'find_next_empty_row' will skip through any existing headers
                     // and footers without having to loop through them each time.
                     // Cells themselves, unfortunately, still have to.
-                    assert!(resolved_cells[*local_auto_index].is_none());
+                    assert!(resolved_cells[*local_auto_index].is_empty());
                     let kind = match row_group.kind {
                         RowGroupKind::Header => TableCellKind::Header(
                             NonZeroU32::ONE,
@@ -1568,14 +2206,13 @@ impl CellGridResolver<'_, '_> {
                         ),
                         RowGroupKind::Footer => TableCellKind::Footer,
                     };
-                    resolved_cells[*local_auto_index] =
-                        Some(Entry::Cell(self.resolve_cell(
-                            T::default(),
-                            0,
-                            first_available_row,
-                            1,
-                            Smart::Custom(kind),
-                        )?));
+                    resolved_cells[*local_auto_index] = Entry::Cell(self.resolve_cell(
+                        T::default(),
+                        0,
+                        first_available_row,
+                        1,
+                        Smart::Custom(kind),
+                    )?);
 
                     group_start..group_end
                 }
@@ -1654,7 +2291,7 @@ impl CellGridResolver<'_, '_> {
     /// Fixup phase (final step in cell grid generation):
     ///
     /// 1. Replace absent entries by resolved empty cells, producing a vector
-    ///    of `Entry` from `Option<Entry>`.
+    ///    replacing `Entry::Empty` slots with resolved default cells.
     ///
     /// 2. Add enough empty cells to the end of the grid such that it has at
     ///    least the given amount of rows (must be a multiple of `columns`,
@@ -1665,7 +2302,7 @@ impl CellGridResolver<'_, '_> {
     ///    can be affected by show rules and grid-wide styling.
     fn fixup_cells<T>(
         &mut self,
-        resolved_cells: Vec<Option<Entry>>,
+        mut resolved_cells: Vec<Entry>,
         columns: usize,
     ) -> SourceResult<Vec<Entry>>
     where
@@ -1674,29 +2311,22 @@ impl CellGridResolver<'_, '_> {
         let Some(expected_total_cells) = columns.checked_mul(self.tracks.y.len()) else {
             bail!(self.span, "too many rows were specified");
         };
-        let missing_cells = expected_total_cells.saturating_sub(resolved_cells.len());
+        // Extend to expected size with empty entries (never shrink).
+        let target = expected_total_cells.max(resolved_cells.len());
+        resolved_cells.resize_with(target, || Entry::Empty);
 
-        resolved_cells
-            .into_iter()
-            .chain(std::iter::repeat_with(|| None).take(missing_cells))
-            .enumerate()
-            .map(|(i, cell)| {
-                if let Some(cell) = cell {
-                    Ok(cell)
-                } else {
-                    let x = i % columns;
-                    let y = i / columns;
+        // Replace empty entries in-place with resolved default cells.
+        // This avoids allocating a second Vec<Entry> (~151 MB for 300K cells).
+        for (i, entry) in resolved_cells.iter_mut().enumerate() {
+            if entry.is_empty() {
+                let x = i % columns;
+                let y = i / columns;
+                *entry =
+                    Entry::Cell(self.resolve_cell(T::default(), x, y, 1, Smart::Auto)?);
+            }
+        }
 
-                    Ok(Entry::Cell(self.resolve_cell(
-                        T::default(),
-                        x,
-                        y,
-                        1,
-                        Smart::Auto,
-                    )?))
-                }
-            })
-            .collect::<SourceResult<Vec<Entry>>>()
+        Ok(resolved_cells)
     }
 
     /// Takes the list of pending lines and evaluates a final list of hlines
@@ -1996,7 +2626,7 @@ impl CellGridResolver<'_, '_> {
 /// returned. Otherwise, the new `start..end` range of rows in the row group is
 /// returned.
 fn expand_row_group(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     group_range: Option<&Range<usize>>,
     group_kind: RowGroupKind,
     first_available_row: usize,
@@ -2086,7 +2716,7 @@ fn expand_row_group(
             .get(new_y * columns..)
             .map(|cells| &cells[..columns.min(cells.len())])
         {
-            if new_row.iter().any(Option::is_some) {
+            if new_row.iter().any(|e| !e.is_empty()) {
                 bail!(
                     "cell would cause {} to expand to non-empty row {new_y}",
                     group_kind.name();
@@ -2166,7 +2796,7 @@ fn resolve_cell_position(
     header_rows: &SmallBitSet,
     headers: &[Repeatable<Header>],
     footer: Option<&(usize, Span, Footer)>,
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: &mut usize,
     first_available_row: usize,
     columns: usize,
@@ -2292,7 +2922,10 @@ fn resolve_cell_position(
                     // in which case we can just expand the vector enough to
                     // place this cell. In either case, we found an available
                     // position.
-                    !matches!(resolved_cells.get(*possible_index), Some(Some(_)))
+                    matches!(
+                        resolved_cells.get(*possible_index),
+                        None | Some(Entry::Empty)
+                    )
                 })
                 .ok_or_else(|| {
                     eco_format!(
@@ -2314,7 +2947,7 @@ fn resolve_cell_position(
 fn find_next_available_position(
     header_rows: &SmallBitSet,
     footer: Option<&(usize, Span, Footer)>,
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     columns: usize,
     initial_index: usize,
     skip_rows: bool,
@@ -2322,7 +2955,7 @@ fn find_next_available_position(
     let mut resolved_index = initial_index;
 
     loop {
-        if let Some(Some(_)) = resolved_cells.get(resolved_index) {
+        if matches!(resolved_cells.get(resolved_index), Some(e) if !e.is_empty()) {
             // Skip any non-absent cell positions (`Some(None)`) to
             // determine where this cell will be placed. An out of
             // bounds position (thus `None`) is also a valid new
@@ -2376,14 +3009,14 @@ fn find_next_available_position(
 /// an initial index for search, since we know that there are no empty rows
 /// before automatically-positioned cells, as they are placed sequentially.
 fn find_next_empty_row(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: usize,
     columns: usize,
 ) -> usize {
     let mut resolved_index = auto_index.next_multiple_of(columns);
     while resolved_cells
         .get(resolved_index..resolved_index + columns)
-        .is_some_and(|row| row.iter().any(Option::is_some))
+        .is_some_and(|row| row.iter().any(|e| !e.is_empty()))
     {
         // Skip non-empty rows.
         resolved_index += columns;
@@ -2400,7 +3033,7 @@ fn find_next_empty_row(
 /// Otherwise, the hline would just be placed under the first row of those
 /// rowspans and disappear (except at the presence of column gutter).
 fn skip_auto_index_through_fully_merged_rows(
-    resolved_cells: &[Option<Entry>],
+    resolved_cells: &[Entry],
     auto_index: &mut usize,
     columns: usize,
 ) {
@@ -2412,7 +3045,7 @@ fn skip_auto_index_through_fully_merged_rows(
         while resolved_cells
             .get(*auto_index..*auto_index + columns)
             .is_some_and(|row| {
-                row.iter().all(|entry| matches!(entry, Some(Entry::Merged { .. })))
+                row.iter().all(|entry| matches!(entry, Entry::Merged { .. }))
             })
         {
             *auto_index += columns;

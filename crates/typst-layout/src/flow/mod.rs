@@ -105,7 +105,12 @@ pub fn layout_columns(
 }
 
 /// The cached, internal implementation of [`layout_fragment`].
-#[comemo::memoize]
+// Disabled during: streaming mode (Phase 2), cell bypass (large table cell
+// layout), AND layout eviction (iter 1). In iter 1, comemo builds a constraint
+// Vec tracking all Sink modifications (~168 MB for 1M-cell tables). This is
+// wasted when the document stabilizes in 1 iteration or when page-run cache
+// misses in iter 2 trigger a fresh layout_fragment_impl call anyway.
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_streaming_mode() && !typst_library::engine_flags::is_cell_memoize_bypassed() && !typst_library::engine_flags::is_layout_eviction_enabled())]
 #[allow(clippy::too_many_arguments)]
 fn layout_fragment_impl(
     routines: &Routines,
@@ -214,8 +219,17 @@ pub fn layout_flow<'a>(
         mode,
     )?;
 
+    // Note: we intentionally do NOT evict comemo caches here.
+    // Evicting after collecting destroys cross-iteration cache hits,
+    // making iteration 2 in multi-iteration documents 6x slower.
+    // Memory is managed instead by: cell memoization bypass for large
+    // grids, periodic grid eviction, and post-layout evict(0).
+
     let mut work = Work::new(&children);
-    let mut finished = vec![];
+    // Pre-allocate with a reasonable hint: at least backlog size + 1.
+    // This avoids expensive Vec doublings for large documents.
+    let initial_capacity = regions.backlog.len() + 1;
+    let mut finished = Vec::with_capacity(initial_capacity);
 
     // This loop runs once per region produced by the flow layout.
     loop {
@@ -232,6 +246,53 @@ pub fn layout_flow<'a>(
     }
 
     Ok(Fragment::frames(finished))
+}
+
+/// Streaming variant of [`layout_flow`] that yields frames one at a time
+/// via a callback instead of accumulating them in a Fragment.
+///
+/// Each composed frame is passed to `on_frame` immediately, allowing the
+/// caller to process and drop it before the next frame is composed. This
+/// dramatically reduces peak memory for large documents by avoiding
+/// holding all page frames simultaneously.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_flow_streaming<'a>(
+    engine: &mut Engine,
+    children: &[Pair<'a>],
+    locator: &mut SplitLocator<'a>,
+    shared: StyleChain<'a>,
+    mut regions: Regions,
+    columns: NonZeroUsize,
+    column_gutter: Rel<Abs>,
+    mode: FlowMode,
+    on_frame: &mut dyn FnMut(&mut Engine, Frame) -> SourceResult<()>,
+) -> SourceResult<()> {
+    let config = configuration(shared, regions, columns, column_gutter, mode);
+
+    let bump = Bump::new();
+    let children = collect(
+        engine,
+        &bump,
+        children,
+        locator.next(&()),
+        Size::new(config.columns.width, regions.full),
+        regions.expand.x,
+        mode,
+    )?;
+
+    let mut work = Work::new(&children);
+
+    loop {
+        let frame = compose(engine, &mut work, &config, locator.next(&()), regions)?;
+        let done = work.done() && (!regions.expand.y || regions.backlog.is_empty());
+        on_frame(engine, frame)?;
+        if done {
+            break;
+        }
+        regions.next();
+    }
+
+    Ok(())
 }
 
 /// Determine the flow's configuration.

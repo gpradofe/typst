@@ -2,18 +2,19 @@
   /Summary: "The table summary"
   /BBox: [  9.500,   9.500, 110.500,  69.820]
   /BorderColor: #000000
+  /BorderStyle: Solid
   /BorderThickness:   1.000
   /K:
     - Tag: TR
       /K:
-        - Tag: TD
+        - Tag: TH
+          /Id: "U1x0y0"
+          /Scope: Column
           /Headers: []
-          /BorderStyle: Solid
         - Tag: TH
           /Id: "U1x1y0"
           /Scope: Column
           /Headers: []
-          /BorderStyle: Solid
           /K:
             - Content: page=0 mcid=0
             - Content: page=0 mcid=1
@@ -22,13 +23,11 @@
         - Tag: TH
           /Id: "U1x0y1"
           /Scope: Row
-          /Headers: []
-          /BorderStyle: Solid
+          /Headers: ["U1x0y0"]
           /K:
             - Content: page=0 mcid=2
             - Content: page=0 mcid=3
         - Tag: TD
           /Headers: ["U1x1y0", "U1x0y1"]
-          /BorderStyle: Solid
           /K:
             - Content: page=0 mcid=4
