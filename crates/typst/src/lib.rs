@@ -122,6 +122,8 @@ fn compile_impl<T: Output>(
     // Clear thread-local CellGrid cache from any previous compilation.
     typst_library::layout::grid::resolve::clear_cellgrid_cache();
 
+    typst_library::progress::report(typst_library::progress::Event::Stage("eval"));
+
     // First evaluate the main source file into a module.
     let content = typst_eval::eval(
         &ROUTINES,
@@ -141,9 +143,14 @@ fn compile_impl<T: Output>(
     let mut history: ArrayVec<T, { MAX_ITERS - 1 }> = ArrayVec::new();
     let mut document: T;
 
+    typst_library::progress::report(typst_library::progress::Event::Stage("layout"));
+
     // Relayout until all introspections stabilize.
     // If that doesn't happen within five attempts, we give up.
     loop {
+        typst_library::progress::report(typst_library::progress::Event::Iteration(
+            (history.len() + 1) as u32,
+        ));
         let _scope = TimingScope::new(ITER_NAMES[history.len()]);
 
         // Enable layout-time eviction for memory management during layout.

@@ -34,6 +34,9 @@ use typst_kit::server::HttpServer;
 pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
     let mut timer = Timer::new_or_placeholder(command.args.timings.clone());
     let mut config = CompileConfig::new(command)?;
+    if let Some(mode) = progress_mode(&command.args.progress, command.args.verbose) {
+        typst::progress::install(std::sync::Arc::new(crate::progress::CliSink::new(mode)));
+    }
     let mut world = SystemWorld::new(
         Some(&command.args.input),
         &command.args.world,
@@ -41,6 +44,15 @@ pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
     )
     .map_err(|err| eco_format!("{err}"))?;
     timer.record(&mut world, |world| compile_once(world, &mut config))?
+}
+
+fn progress_mode(progress: &bool, verbose: bool) -> Option<crate::progress::Mode> {
+    match (*progress, verbose) {
+        (true, true) => Some(crate::progress::Mode::Both),
+        (true, false) => Some(crate::progress::Mode::Progress),
+        (false, true) => Some(crate::progress::Mode::Verbose),
+        (false, false) => None,
+    }
 }
 
 /// A preprocessed `CompileCommand`.
@@ -322,6 +334,13 @@ fn compile_and_export(
             if config.deps.is_none() {
                 world.clear_file_data();
             }
+            if let Ok(doc) = &output {
+                let count = match doc.page_store() {
+                    Some(store) => store.page_count(),
+                    None => doc.pages().len(),
+                };
+                typst::progress::report(typst::progress::Event::Pages(count));
+            }
             let result = output.and_then(|document| export_paged(document, config));
             Warned { output: result, warnings }
         }
@@ -410,6 +429,7 @@ fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResu
             .map_err(|err| eco_format!("failed to open output file ({err})"))
             .at(Span::detached())?;
         typst_pdf::pdf_streaming_to_writer(&mut document, &options, store, writer)?;
+        typst::progress::report(typst::progress::Event::Wrote { bytes: output_size(&config.output) });
     } else {
         let buffer = typst_pdf::pdf(document, &options)?;
         config
@@ -417,8 +437,17 @@ fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResu
             .write(&buffer)
             .map_err(|err| eco_format!("failed to write PDF file ({err})"))
             .at(Span::detached())?;
+        typst::progress::report(typst::progress::Event::Wrote { bytes: buffer.len() as u64 });
     };
     Ok(())
+}
+
+fn output_size(output: &Output) -> u64 {
+    if let Output::Path(path) = output {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// Creates options for PDF export.

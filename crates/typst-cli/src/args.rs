@@ -382,6 +382,20 @@ pub struct CompileArgs {
     /// apart from file names and line numbers.
     #[arg(long = "timings", value_name = "OUTPUT_JSON")]
     pub timings: Option<PathBuf>,
+
+    /// Print a running progress indicator to stderr while compiling.
+    ///
+    /// Output takes the form `[progress 1.2s] 42% <stage>`. Can be combined
+    /// with `--verbose` to interleave stage-boundary logs.
+    #[arg(short = 'p', long = "progress")]
+    pub progress: bool,
+
+    /// Print timestamped stage transitions to stderr while compiling.
+    ///
+    /// Useful for understanding where time is being spent. Can be combined
+    /// with `--progress` to also see a running percentage.
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
 }
 
 /// Arguments for the construction of a world. Shared by compile, watch, eval, and
