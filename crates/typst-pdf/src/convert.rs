@@ -295,6 +295,9 @@ fn convert_pages_from_store(
     document: &mut Document,
     store: &typst_layout::page_store::DiskPageStore,
 ) -> SourceResult<()> {
+    let total = store.page_count();
+    typst_library::progress::report(typst_library::progress::Event::Stage("export"));
+
     // Use sequential iterator for efficient buffered reading.
     let page_iter = store
         .pages_iter()
@@ -302,6 +305,10 @@ fn convert_pages_from_store(
         .at(Span::detached())?;
 
     for (i, page_result) in page_iter.enumerate() {
+        typst_library::progress::report(typst_library::progress::Event::PageEmitted {
+            done: i + 1,
+            total,
+        });
         if gc.page_index_converter.pdf_page_index(i).is_none() {
             continue;
         }
@@ -362,9 +369,15 @@ fn convert_pages(
     document: &mut Document,
     pages: Vec<typst_layout::Page>,
 ) -> SourceResult<()> {
+    let total = pages.len();
+    typst_library::progress::report(typst_library::progress::Event::Stage("export"));
     // Process each page and drop it immediately after to free memory.
     // This prevents holding all page frames in memory during PDF conversion.
     for (i, typst_page) in pages.into_iter().enumerate() {
+        typst_library::progress::report(typst_library::progress::Event::PageEmitted {
+            done: i + 1,
+            total,
+        });
         if gc.page_index_converter.pdf_page_index(i).is_none() {
             // Don't export this page.
             continue;

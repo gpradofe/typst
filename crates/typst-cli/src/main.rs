@@ -17,6 +17,7 @@ mod greet;
 mod info;
 mod init;
 mod packages;
+mod progress;
 mod query;
 mod terminal;
 mod timings;

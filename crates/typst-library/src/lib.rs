@@ -22,6 +22,7 @@ pub mod loading;
 pub mod math;
 pub mod model;
 pub mod pdf;
+pub mod progress;
 pub mod routines;
 pub mod symbols;
 pub mod text;
