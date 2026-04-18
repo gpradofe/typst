@@ -271,7 +271,7 @@ impl Counter {
         let context = Context::new(Some(loc), Some(styles));
         Ok(engine
             .introspect(CounterAtIntrospection(self.clone(), loc, span))?
-            .display(engine, context.track(), span, numbering)?
+            .display(engine, context.track(), numbering)?
             .display())
     }
 
@@ -437,9 +437,9 @@ impl Counter {
 
         if at.is_custom() {
             let context = Context::new(Some(location), context.styles().ok());
-            state.display(engine, context.track(), span, &numbering)
+            state.display(engine, context.track(), &numbering)
         } else {
-            state.display(engine, context, span, &numbering)
+            state.display(engine, context, &numbering)
         }
     }
 
@@ -636,10 +636,9 @@ impl CounterState {
         &self,
         engine: &mut Engine,
         context: Tracked<Context>,
-        span: Span,
         numbering: &Numbering,
     ) -> SourceResult<Value> {
-        numbering.apply(engine, context, span, &self.0)
+        numbering.apply(engine, context, &self.0)
     }
 }
 
@@ -747,7 +746,7 @@ impl ManualPageCounter {
         for (_, item) in page.items() {
             match item {
                 FrameItem::Group(group) => self.visit(engine, &group.frame)?,
-                FrameItem::Tag(Tag::Start(elem, _)) => {
+                FrameItem::Tag(Tag::Start(elem, _, _)) => {
                     let Some(elem) = elem.to_packed::<CounterUpdateElem>() else {
                         continue;
                     };
@@ -757,6 +756,8 @@ impl ManualPageCounter {
                         self.logical = state.first();
                     }
                 }
+                // CellStart tags never contain CounterUpdateElem, skip.
+                FrameItem::Tag(Tag::CellStart(..)) => {}
                 _ => {}
             }
         }

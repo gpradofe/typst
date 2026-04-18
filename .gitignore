@@ -18,6 +18,10 @@ tarpaulin-report.html
 /target
 **/*.rs.bk
 
+# Profiling output
+dhat-heap*.json
+timings*.json
+
 # Node
 node_modules
 tools/test-helper/dist

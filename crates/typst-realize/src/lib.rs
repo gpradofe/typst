@@ -6,7 +6,6 @@
 
 use std::borrow::Cow;
 use std::cell::LazyCell;
-use std::slice::SliceIndex;
 
 use arrayvec::ArrayVec;
 use bumpalo::Bump;
@@ -25,12 +24,12 @@ use typst_library::introspection::{
     Locatable, LocationKey, SplitLocator, Tag, TagElem, TagFlags, Tagged,
 };
 use typst_library::layout::{
-    AlignElem, BoxElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
+    AlignElem, BoxElem, GridElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
 };
 use typst_library::math::{EquationElem, Mathy};
 use typst_library::model::{
     CiteElem, CiteGroup, DocumentElem, EnumElem, ListElem, ListItemLike, ListLike,
-    ParElem, ParbreakElem, TermsElem,
+    ParElem, ParbreakElem, TableElem, TermsElem,
 };
 use typst_library::routines::{Arenas, FragmentKind, Pair, RealizationKind};
 use typst_library::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
@@ -578,16 +577,29 @@ fn prepare(
 
     // If the element is locatable, create start and end tags to be able to find
     // the element in the frames after layout. Do this after synthesis and
-    // materialization, so that it includes the synthesized fields. Do it before
-    // marking as prepared so that show-set rules will apply to this element
-    // when queried.
+    // materialization, so that it includes the synthesized fields.
+    //
+    // For table/grid elements with large children Vecs, mark as prepared
+    // BEFORE cloning for the Tag. This avoids a second deep clone (~40 MB
+    // for 100K-row tables) that would otherwise be triggered by
+    // mark_prepared seeing refcount > 1 after elem.clone(). The trade-off
+    // is that the Tag's Content will be prepared, but table/grid elements
+    // are rarely queried and their materialized styles are already baked in.
+    //
+    // For other elements, mark as prepared AFTER cloning so that queried
+    // elements get show-set rules re-applied (see issue-3726-query-show-set).
+    let has_heavy_children = elem.is::<TableElem>() || elem.is::<GridElem>();
+    if has_heavy_children {
+        elem.mark_prepared();
+    }
+
     let tags = elem
         .location()
-        .map(|loc| (Tag::Start(elem.clone(), flags), Tag::End(loc, key, flags)));
+        .map(|loc| (Tag::Start(elem.clone(), loc, flags), Tag::End(loc, key, flags)));
 
-    // Ensure that this preparation only runs once by marking the element as
-    // prepared.
-    elem.mark_prepared();
+    if !has_heavy_children {
+        elem.mark_prepared();
+    }
 
     Ok(tags)
 }
@@ -1364,21 +1376,11 @@ fn find_regex_match_in_str<'a>(
     })
 }
 
-/// Visit a regular expression match and any surrounding textual elements.
+/// Visit a match of a regular expression.
 ///
-/// This will visit the following in order:
-/// - Elements that come fully before the match: `elem <match>`
-/// - Text that was interrupted by the start of the match: `te<match>`
-/// - The matched text itself, sliced off as a new element: `<match>`
-/// - Tag elements that come between parts of the match: `mat<tag>ch`
-/// - Text that was interrupted by the end of the match: `<match>xt`
-/// - Elements that come fully after the match: `<match> elem`
-///
-/// The matched text element will always be a `TextElem` or `SymbolElem` so that
-/// user code can rely on the element having a `.text` field to access the
-/// underlying string. If the regex matched only one existing text or symbol
-/// element, then the new element will be derived from that one, otherwise it
-/// will be built fresh with the span of the first matching element.
+/// This first revisits all elements before the match, potentially slicing up
+/// a text element, then the transformed match, and then the remaining elements
+/// after the match.
 fn visit_regex_match<'a>(
     s: &mut State<'a, '_, '_, '_>,
     elems: &[Pair<'a>],
@@ -1386,12 +1388,39 @@ fn visit_regex_match<'a>(
 ) -> SourceResult<()> {
     let match_range = m.offset..m.offset + m.text.len();
 
+    // Replace with the correct intuitive element kind: if matching against a
+    // lone symbol, return a `SymbolElem`, otherwise return a newly composed
+    // `TextElem`. We should only match against a `SymbolElem` during math
+    // realization (`RealizationKind::Math`).
+    let piece = if let &[(lone, _)] = elems
+        && let Some(symbol) = lone.to_packed::<SymbolElem>()
+    {
+        if symbol.text.len() == m.text.len() {
+            lone.clone()
+        } else {
+            SymbolElem::packed(m.text)
+        }
+    } else {
+        TextElem::packed(m.text)
+    };
+
+    let context = Context::new(None, Some(m.styles));
+    let output = m.recipe.apply(s.engine, context.track(), piece)?;
+
     let mut cursor = 0;
-    let mut m = Some(m);
+    let mut output = Some(output);
+    let mut visit_unconsumed_match = |s: &mut State<'a, '_, '_, '_>| -> SourceResult<()> {
+        if let Some(output) = output.take() {
+            let revocation = Style::Revocation(m.id).into();
+            let outer = s.arenas.bump.alloc(m.styles);
+            let chained = outer.chain(s.arenas.styles.alloc(revocation));
+            visit(s, s.store(output), chained)?;
+        }
+        Ok(())
+    };
 
     for &(content, styles) in elems {
-        // Just forward tags. If a tag is between elements of the match, it will
-        // be visited immediately after the match.
+        // Just forward tags.
         if content.is::<TagElem>() {
             visit(s, content, styles)?;
             continue;
@@ -1408,92 +1437,61 @@ fn visit_regex_match<'a>(
             1 // The rest are Ascii, so just one byte.
         };
         let elem_range = cursor..cursor + len;
-        cursor = elem_range.end;
 
-        if elem_range.end <= match_range.start || match_range.end <= elem_range.start {
-            // This element is entirely outside the matched range, visit it
-            // without slicing.
-            visit(s, content, styles)?;
-            continue;
-        }
-
+        // If the element starts before the start of match, visit it fully or
+        // sliced.
         if elem_range.start < match_range.start {
-            // This element's text begins before the start of the match, visit
-            // that initial part.
-            let end = match_range.start - elem_range.start;
-            visit(s, s.store(slice_textual(content, ..end)), styles)?;
-        }
-
-        // We visit the matched text itself when at the first element of the
-        // match. Note that we will effectively ignore the elements which
-        // compose the match.
-        if let Some(RegexMatch { text, styles, id, recipe, offset: _ }) = m.take() {
-            // Otherwise, we would have overlapped with a previous element.
-            debug_assert!(elem_range.start <= match_range.start);
-
-            let matched_text = if match_range.end <= elem_range.end
-                && (content.is::<TextElem>() || content.is::<SymbolElem>())
-            {
-                // If the match is fully contained within one sliceable element,
-                // we slice it to retain its element type and span/label.
-                slice_textual(
-                    content,
-                    match_range.start - elem_range.start
-                        ..match_range.end - elem_range.start,
-                )
+            if elem_range.end <= match_range.start {
+                visit(s, content, styles)?;
+            } else if let Some(elem) = content.to_packed::<TextElem>() {
+                let mut elem = elem.clone();
+                elem.text = elem.text[..match_range.start - elem_range.start].into();
+                visit(s, s.store(elem.pack()), styles)?;
+            } else if let Some(elem) = content.to_packed::<SymbolElem>() {
+                // Symbols are also sliced despite being a single grapheme
+                // cluster for consistency with text. We may want to more
+                // generally avoid slicing grapheme clusters in the future
+                // (see <https://github.com/typst/typst/issues/8058>).
+                let mut elem = elem.clone();
+                elem.text = elem.text[..match_range.start - elem_range.start].into();
+                visit(s, s.store(elem.pack()), styles)?;
             } else {
-                // Otherwise we need to create a fresh text element and can only
-                // retain the span of the first matching element.
-                //
-                // Creating a text element instead of propagating the
-                // space/linebreak/smartquote ensures we always provide an
-                // element with a `.text` field, so that users can rely on that
-                // field being accessible.
-                TextElem::packed(text).spanned(content.span())
-            };
-
-            // Apply the show rule and visit the show rule's output element.
-            let context = Context::new(None, Some(styles));
-            let output = recipe.apply(s.engine, context.track(), matched_text)?;
-            let revocation = Style::Revocation(id).into();
-            let outer = s.arenas.bump.alloc(styles);
-            let chained = outer.chain(s.arenas.styles.alloc(revocation));
-            visit(s, s.store(output), chained)?;
+                unreachable!();
+            }
         }
 
+        // When the match starts before this element ends, visit it.
+        if match_range.start < elem_range.end {
+            visit_unconsumed_match(s)?;
+        }
+
+        // If the element ends after the end of the match, visit if fully or
+        // sliced.
         if elem_range.end > match_range.end {
-            // This element's text finishes after the end of the match, visit
-            // that final part.
-            let start = match_range.end - elem_range.start;
-            visit(s, s.store(slice_textual(content, start..)), styles)?;
+            if elem_range.start >= match_range.end {
+                visit(s, content, styles)?;
+            } else if let Some(elem) = content.to_packed::<TextElem>() {
+                let mut elem = elem.clone();
+                elem.text = elem.text[match_range.end - elem_range.start..].into();
+                visit(s, s.store(elem.pack()), styles)?;
+            } else if let Some(elem) = content.to_packed::<SymbolElem>() {
+                let mut elem = elem.clone();
+                elem.text = elem.text[match_range.end - elem_range.start..].into();
+                visit(s, s.store(elem.pack()), styles)?;
+            } else {
+                unreachable!();
+            }
         }
+
+        cursor = elem_range.end;
     }
 
-    debug_assert!(m.is_none());
+    // If the match wasn't consumed yet, visit it. This shouldn't really happen
+    // in practice (we'd need to have an empty match at the end), but it's an
+    // extra fail-safe.
+    visit_unconsumed_match(s)?;
+
     Ok(())
-}
-
-/// Takes a text or symbol element and returns an appropriate sliced output
-/// element.
-fn slice_textual(elem: &Content, range: impl SliceIndex<str, Output = str>) -> Content {
-    if let Some(elem) = elem.to_packed::<TextElem>() {
-        // Unfortunately, we can't apply a `TextElem::span_offset` for more
-        // precise tracking here because it creates a user-visible styled
-        // element, nesting the text element, and obscuring the `.text` field.
-        let mut elem = elem.clone();
-        elem.text = elem.text[range].into();
-        elem.pack()
-    } else if let Some(elem) = elem.to_packed::<SymbolElem>() {
-        // Symbols are also sliced despite being a single grapheme cluster for
-        // consistency with text. We may want to more generally avoid slicing
-        // grapheme clusters in the future.
-        // See also: <https://github.com/typst/typst/issues/8058>
-        let mut elem = elem.clone();
-        elem.text = elem.text[range].into();
-        elem.pack()
-    } else {
-        panic!("can only slice text and symbols");
-    }
 }
 
 /// Finds the first non-detached span in the list.

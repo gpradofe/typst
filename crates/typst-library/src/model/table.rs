@@ -1,7 +1,8 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 
-use ecow::EcoString;
+use ecow::{EcoString, EcoVec};
+use typst_syntax::Span;
 use typst_utils::NonZeroExt;
 
 use crate::diag::{HintedStrResult, HintedString, SourceResult, bail};
@@ -9,8 +10,9 @@ use crate::engine::Engine;
 use crate::foundations::{
     Content, Packed, Smart, StyleChain, Synthesize, cast, elem, scope,
 };
+use crate::foundations::{Target, TargetElem};
 use crate::introspection::{Locatable, Tagged};
-use crate::layout::resolve::{CellGrid, table_to_cellgrid};
+use crate::layout::resolve::{CellGrid, GridMeta, cached_table_cellgrid};
 use crate::layout::{
     Abs, Alignment, Celled, GridCell, GridFooter, GridHLine, GridHeader, GridVLine,
     Length, OuterHAlignment, OuterVAlignment, Rel, Sides, TrackSizings,
@@ -283,10 +285,29 @@ pub struct TableElem {
     #[synthesized]
     pub grid: Arc<CellGrid>,
 
+    /// Compact metadata for PDF tagging. Only stroke/fill/structural data,
+    /// no Content bodies. ~11 MB vs ~42 MB for full CellGrid across 218 tables.
+    #[internal]
+    #[synthesized]
+    pub grid_meta: Arc<GridMeta>,
+
+    /// Cache key computed during synthesize for CellGrid lookup.
+    /// Stored so layout_table can find the same cache entry despite
+    /// materialize() changing the element hash after synthesize.
+    #[internal]
+    #[synthesized]
+    pub grid_cache_key: u128,
+
     /// The contents of the table cells, plus any extra table lines specified
     /// with the [`table.hline`] and [`table.vline`] elements.
+    ///
+    /// Uses `EcoVec` instead of `Vec` so that `Content::clone()` during
+    /// realize doesn't deep-clone 1M+ TableChild items (~80 MB for 100K rows).
+    /// EcoVec::clone is O(1) (refcount increment). No code modifies children
+    /// after table construction, so copy-on-write is never triggered.
     #[variadic]
-    pub children: Vec<TableChild>,
+    #[parse(args.all_eco()?)]
+    pub children: EcoVec<TableChild>,
 }
 
 #[scope]
@@ -313,8 +334,30 @@ impl Synthesize for Packed<TableElem> {
         engine: &mut Engine,
         styles: StyleChain,
     ) -> SourceResult<()> {
-        let grid = table_to_cellgrid(self, engine, styles)?;
-        self.grid = Some(Arc::new(grid));
+        let (grid, cache_key) = cached_table_cellgrid(self, engine, styles)?;
+        // In streaming mode (Phase 2), the CellGrid is already in the global
+        // cache from Phase 1. Skip mutating the element to avoid triggering
+        // make_unique, which deep-clones the entire table element including
+        // all TableChild variants (~80 MB for 100K rows). layout_table falls
+        // back to hash-based cache lookup when grid_cache_key is None.
+        if crate::engine_flags::is_streaming_mode() {
+            return Ok(());
+        }
+        // Store cache key so layout_table can find the same cache entry
+        // even after materialize() changes the element hash.
+        self.grid_cache_key = Some(cache_key);
+        if styles.get(TargetElem::target) == Target::Paged {
+            // For paged output: store compact metadata for PDF tagging.
+            let meta = GridMeta::from_cellgrid(&grid);
+            self.grid_meta = Some(Arc::new(meta));
+            // Don't store the full CellGrid on the element. It keeps ~151 MB
+            // alive via the introspector's Content references during PDF export.
+            // layout_table will find the grid via grid_cache_key in the global
+            // cache, or recompute if evicted.
+        } else {
+            // For HTML: store full CellGrid (HTML export needs cell bodies).
+            self.grid = Some(grid);
+        }
         Ok(())
     }
 }
@@ -381,6 +424,11 @@ pub enum TableItem {
     HLine(Packed<TableHLine>),
     VLine(Packed<TableVLine>),
     Cell(Packed<TableCell>),
+    /// Auto-generated cell body — content not explicitly wrapped in
+    /// `table.cell(...)`. Stores just the body Content + Span, deferring
+    /// the ~400-byte `Packed<TableCell>` allocation to resolve time where
+    /// only one cell exists at a time. Saves ~288 MB for 1M-cell tables.
+    BodyOnly(Content, Span),
 }
 
 cast! {
@@ -389,6 +437,9 @@ cast! {
         Self::HLine(hline) => hline.into_value(),
         Self::VLine(vline) => vline.into_value(),
         Self::Cell(cell) => cell.into_value(),
+        Self::BodyOnly(body, span) => {
+            Packed::new(TableCell::new(body)).spanned(span).into_value()
+        }
     },
     v: Content => {
         v.try_into()?
@@ -437,7 +488,9 @@ impl TryFrom<Content> for TableItem {
             .or_else(|value| value.into_packed::<TableCell>().map(Self::Cell))
             .unwrap_or_else(|value| {
                 let span = value.span();
-                Self::Cell(Packed::new(TableCell::new(value)).spanned(span))
+                // Store just the body + span, deferring the Packed<TableCell>
+                // allocation to resolve time (one at a time instead of all 1M).
+                Self::BodyOnly(value, span)
             }))
     }
 }

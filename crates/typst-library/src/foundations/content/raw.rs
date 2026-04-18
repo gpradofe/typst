@@ -220,6 +220,11 @@ impl RawContent {
         self.elem
     }
 
+    /// Returns the allocation pointer as an identity value.
+    pub(super) fn identity(&self) -> usize {
+        self.ptr.as_ptr() as usize
+    }
+
     /// Whether this content holds an element of type `E`.
     pub(super) fn is<E: NativeElement>(&self) -> bool {
         self.elem == E::ELEM

@@ -41,17 +41,20 @@ base64 = "0.22"
 bitflags = { version = "2", features = ["serde"] }
 bumpalo = { version = "3.15.4", features = ["boxed", "collections"] }
 bytemuck = "1"
+chinese-number = { version = "0.7.2", default-features = false, features = ["number-to-chinese"] }
 chrono = { version = "0.4.24", default-features = false, features = ["clock", "std"] }
 ciborium = "0.2.1"
 clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.2.1"
 clap_mangen = "0.2.10"
 codespan-reporting = "0.11"
-codex = { git = "https://github.com/typst/codex", rev = "0426b6a" }
+codex = { git = "https://github.com/typst/codex", rev = "231b9d5" }
 color-print = "0.3.6"
-comemo = "0.5.1"
+comemo = { path = "comemo-local" }
 csv = "1"
 ctrlc = "3.4.1"
+dhat = "0.3"
+bincode = "1.3"
 dirs = "6"
 ecow = { version = "0.2.6", features = ["serde"] }
 either = "1"
@@ -77,14 +80,13 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2" }
+krilla = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
 lipsum = "0.9"
 memchr = "2"
-moxcms = "0.7.5"
 native-tls = "0.2"
 notify = "8"
 once_cell = "1"
@@ -100,6 +102,7 @@ png = "0.17"
 portable-atomic = "1.6"
 proc-macro2 = "1"
 pulldown-cmark = "0.9"
+qcms = "0.3.0"
 quote = "1"
 rayon = "1.7.0"
 regex = "1"
@@ -158,9 +161,10 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+debug = 1
 
 [profile.release.package."typst-cli"]
-strip = true
+strip = false
 
 [workspace.lints.clippy]
 blocks_in_conditions = "allow"
@@ -174,3 +178,18 @@ wildcard_in_or_patterns = "allow"
 # See https://github.com/typst/typst/pull/6560#issuecomment-3045393640
 derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
+
+# Unified cross-compilation config to prevent conflicting getrandom metadata
+[workspace.metadata.cross.target.x86_64-unknown-netbsd]
+pre-build = [
+    "mkdir -p /tmp/netbsd",
+    "curl -fO https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/amd64/binary/sets/base.tar.xz",
+    "tar -C /tmp/netbsd -xJf base.tar.xz",
+    "cp /tmp/netbsd/usr/lib/libexecinfo.so /usr/local/x86_64-unknown-netbsd/lib",
+    "rm base.tar.xz",
+    "rm -rf /tmp/netbsd",
+]
+
+[patch.crates-io]
+comemo = { path = "comemo-local" }
+pdf-writer = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b" }

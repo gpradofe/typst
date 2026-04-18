@@ -16,7 +16,7 @@ use typst_library::introspection::Location;
 use typst_library::layout::Inherit;
 use typst_library::model::LinkMarker;
 
-pub use build::build;
+pub use build::{build, build_from_store};
 pub use text::{ResolvedTextAttrs, TextAttr, resolve_text_attrs};
 
 mod build;
@@ -37,6 +37,8 @@ pub struct Tree {
     pub ctx: Ctx,
     logical_children: FxHashMap<Location, SmallVec<[GroupId; 4]>>,
     pub errors: EcoVec<SourceDiagnostic>,
+    /// Whether `context::finish` has been called. Prevents double processing.
+    pub ctx_finished: bool,
 }
 
 impl Tree {
@@ -432,11 +434,11 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Outline(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        GroupKind::OutlineEntry(entry, _) => {
+        GroupKind::OutlineEntry(b) => {
             if let GroupKind::Outline(outline, _) = tree.groups.get(semantic_parent).kind
             {
                 let outline_ctx = tree.ctx.outlines.get_mut(outline);
-                let entry = entry.clone();
+                let entry = b.0.clone();
                 tree.groups.get_mut(id).parent = semantic_parent;
                 outline_ctx.insert(&mut tree.groups, semantic_parent, entry, id);
             } else {
@@ -446,12 +448,12 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Table(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        &GroupKind::TableCell(ref cell, tag, _) => {
-            let cell = cell.clone();
+        &GroupKind::TableCell(ref info, tag, _) => {
+            let info = *info;
             if let Some(table) = move_into(tree, semantic_parent, id, GroupKind::as_table)
             {
                 let table_ctx = tree.ctx.tables.get_mut(table);
-                table_ctx.insert(&cell, tag, id);
+                table_ctx.insert(&info, tag, id);
             } else {
                 // Avoid panicking, the nesting will be validated later.
                 tree.groups.push_group(direct_parent, id);
@@ -460,11 +462,11 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
         GroupKind::Grid(..) => {
             tree.groups.push_group(direct_parent, id);
         }
-        GroupKind::GridCell(cell, _) => {
-            let cell = cell.clone();
+        GroupKind::GridCell(info, _) => {
+            let info = *info;
             if let Some(grid) = move_into(tree, semantic_parent, id, GroupKind::as_grid) {
                 let grid_ctx = tree.ctx.grids.get_mut(grid);
-                grid_ctx.insert(&cell, id);
+                grid_ctx.insert(&info, id);
             } else {
                 // Avoid panicking, the nesting will be validated later.
                 tree.groups.push_group(direct_parent, id);

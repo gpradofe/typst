@@ -8,7 +8,6 @@ use crate::convert::FrameContext;
 use crate::tags::context::figure::build_figure;
 use crate::tags::context::grid::build_grid;
 use crate::tags::context::table::build_table;
-use crate::tags::groups::GroupKind;
 use crate::tags::tree::ResolvedTextAttrs;
 use crate::tags::tree::Tree;
 use crate::tags::util::{Id, IdVec};
@@ -87,8 +86,11 @@ impl Ctx {
         self.bboxes.push(BBoxCtx::new())
     }
 
-    pub fn bbox(&self, kind: &GroupKind) -> Option<&BBoxCtx> {
-        Some(self.bboxes.get(kind.bbox()?))
+    /// Look up a bounding box by its ID directly. Used by the resolver
+    /// after flattening, when bounding box IDs are stored in
+    /// `FlatTagData::bboxes` instead of in `GroupKind`.
+    pub fn bbox_by_id(&self, id: BBoxId) -> Option<&BBoxCtx> {
+        Some(self.bboxes.get(id))
     }
 }
 
@@ -110,6 +112,10 @@ impl Annotations {
             .set(annot)
             .map_err(|_| ())
             .expect("annotation to be uninitialized");
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn take(&mut self, id: AnnotationId) -> Node {
@@ -201,11 +207,20 @@ impl BBoxCtx {
 }
 
 pub fn finish(tree: &mut Tree) {
+    if tree.ctx_finished {
+        return;
+    }
+    tree.ctx_finished = true;
+
     for figure_id in tree.ctx.figures.ids() {
         build_figure(tree, figure_id);
     }
     for table_id in tree.ctx.tables.ids() {
         build_table(tree, table_id);
+        // Free the heavy cells grid (~137 MB for 100K-row tables).
+        // build_table has moved all cell data into Groups/TagStorage.
+        // Only build_tag() is needed later, which uses summary/border fields.
+        tree.ctx.tables.get_mut(table_id).free_cells();
     }
     for grid_id in tree.ctx.grids.ids() {
         build_grid(tree, grid_id);
