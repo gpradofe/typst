@@ -122,7 +122,6 @@ cargo test --release -p typst-tests
 
 This research was conducted by **[Gustavo Prado](https://github.com/gpradofe)**, who identified the memory scaling issues in Typst while using it for production PDF generation at work. After discovering that large table documents consumed disproportionate amounts of RAM, Gustavo systematically profiled the Typst compiler using dhat heap profiling, traced the root causes through the layout and PDF export pipeline, and designed the optimization strategy.
 
-AI assistance (Claude) was used to accelerate the implementation of the optimizations and automate benchmark infrastructure, but the problem identification, profiling analysis, architectural decisions, and validation were led by Gustavo.
 
 The goal is to contribute these optimizations upstream to the [Typst project](https://github.com/typst/typst) to benefit all users working with large documents.
 
@@ -135,7 +134,7 @@ The goal is to contribute these optimizations upstream to the [Typst project](ht
 - **`typst-pdf`** — Flat tag tree, streaming PDF conversion
 - **`typst-cli`** — Streaming PDF export for large documents
 
-For the complete list, see the [CLAUDE.md](CLAUDE.md) file.
+For the complete list, see the [FORK_NOTES.md](FORK_NOTES.md) file.
 
 ---
 
