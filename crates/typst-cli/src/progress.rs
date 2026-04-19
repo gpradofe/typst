@@ -51,20 +51,15 @@ impl Sink for CliSink {
         if verbose {
             match &event {
                 Event::Stage(name) => {
-                    let _ = writeln!(out, "[typst {:>5.2}s] stage: {}", elapsed, name);
+                    let _ = writeln!(out, "[typst {elapsed:>5.2}s] stage: {name}");
                 }
                 Event::Iteration(n) => {
-                    let _ = writeln!(
-                        out,
-                        "[typst {:>5.2}s] layout iteration {}",
-                        elapsed, n
-                    );
+                    let _ = writeln!(out, "[typst {elapsed:>5.2}s] layout iteration {n}");
                 }
                 Event::Pages(n) => {
                     let _ = writeln!(
                         out,
-                        "[typst {:>5.2}s] layout converged, {} page(s)",
-                        elapsed, n
+                        "[typst {elapsed:>5.2}s] layout converged, {n} page(s)",
                     );
                 }
                 Event::PageEmitted { done, total } => {
@@ -75,19 +70,14 @@ impl Sink for CliSink {
                     {
                         let _ = writeln!(
                             out,
-                            "[typst {:>5.2}s] export {}/{}",
-                            elapsed, done, total
+                            "[typst {elapsed:>5.2}s] export {done}/{total}",
                         );
                         state.last_page_logged = *done;
                     }
                 }
                 Event::Wrote { bytes } => {
-                    let _ = writeln!(
-                        out,
-                        "[typst {:>5.2}s] wrote output ({})",
-                        elapsed,
-                        human_bytes(*bytes),
-                    );
+                    let human = human_bytes(*bytes);
+                    let _ = writeln!(out, "[typst {elapsed:>5.2}s] wrote output ({human})");
                 }
             }
         }
@@ -108,8 +98,7 @@ impl Sink for CliSink {
                 let suffix = describe(&event);
                 let _ = writeln!(
                     out,
-                    "[progress {:>5.2}s] {:>3}% {}",
-                    elapsed, percent, suffix,
+                    "[progress {elapsed:>5.2}s] {percent:>3}% {suffix}",
                 );
             }
         }
@@ -138,9 +127,9 @@ fn percent_for(event: &Event) -> u8 {
 fn describe(event: &Event) -> String {
     match event {
         Event::Stage(name) => (*name).to_string(),
-        Event::Iteration(n) => format!("layout iteration {}", n),
-        Event::Pages(n) => format!("layout converged, {} page(s)", n),
-        Event::PageEmitted { done, total } => format!("export {}/{}", done, total),
+        Event::Iteration(n) => format!("layout iteration {n}"),
+        Event::Pages(n) => format!("layout converged, {n} page(s)"),
+        Event::PageEmitted { done, total } => format!("export {done}/{total}"),
         Event::Wrote { bytes } => format!("wrote ({})", human_bytes(*bytes)),
     }
 }
@@ -150,13 +139,16 @@ fn human_bytes(bytes: u64) -> String {
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
     if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+        let v = bytes as f64 / GB as f64;
+        format!("{v:.1} GB")
     } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
+        let v = bytes as f64 / MB as f64;
+        format!("{v:.1} MB")
     } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+        let v = bytes as f64 / KB as f64;
+        format!("{v:.1} KB")
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -182,8 +174,8 @@ mod tests {
         let mut last = 0u8;
         for (event, expected) in seq {
             let got = percent_for(&event);
-            assert_eq!(got, expected, "event {:?}", event);
-            assert!(got >= last, "percent went backwards: {} -> {}", last, got);
+            assert_eq!(got, expected, "event {event:?}");
+            assert!(got >= last, "percent went backwards: {last} -> {got}");
             last = got;
         }
     }

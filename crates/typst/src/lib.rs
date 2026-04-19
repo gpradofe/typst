@@ -178,7 +178,6 @@ fn compile_impl<T: Output>(
         // (may be set to 0 for large documents).
         typst_library::engine_flags::reset_grid_entries();
         typst_library::engine_flags::disable_table_level_bypass();
-        typst_library::engine_flags::reset_table_cache_budget();
         // For iteration 2+, if iteration 1 detected large table data (either
         // one huge table or many smaller ones), bypass layout_fragment_impl
         // memoization to avoid rebuilding the ~168 MB constraint Vec.
