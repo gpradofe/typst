@@ -119,6 +119,114 @@ pub fn is_table_level_bypassed() -> bool {
 /// Set to 8M to exempt 600K while catching 1.2M+.
 pub const TABLE_CACHE_ENTRY_LIMIT: usize = 8_000_000;
 
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
+    use super::*;
+
+    // These flags are process-global, so every test that touches them must
+    // run under the same serial guard to avoid stomping on the others.
+    fn guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn layout_eviction_toggles() {
+        let _g = guard();
+        enable_layout_eviction();
+        assert!(is_layout_eviction_enabled());
+        disable_layout_eviction();
+        assert!(!is_layout_eviction_enabled());
+        enable_layout_eviction();
+        assert!(is_layout_eviction_enabled());
+    }
+
+    #[test]
+    fn streaming_mode_toggles() {
+        let _g = guard();
+        disable_streaming_mode();
+        assert!(!is_streaming_mode());
+        enable_streaming_mode();
+        assert!(is_streaming_mode());
+        disable_streaming_mode();
+        assert!(!is_streaming_mode());
+    }
+
+    #[test]
+    fn cell_memoize_bypass_toggles() {
+        let _g = guard();
+        disable_cell_memoize_bypass();
+        assert!(!is_cell_memoize_bypassed());
+        enable_cell_memoize_bypass();
+        assert!(is_cell_memoize_bypassed());
+        disable_cell_memoize_bypass();
+        assert!(!is_cell_memoize_bypassed());
+    }
+
+    #[test]
+    fn table_level_bypass_toggles() {
+        let _g = guard();
+        disable_table_level_bypass();
+        assert!(!is_table_level_bypassed());
+        enable_table_level_bypass();
+        assert!(is_table_level_bypassed());
+        disable_table_level_bypass();
+        assert!(!is_table_level_bypassed());
+    }
+
+    #[test]
+    fn grid_entry_counter_accumulates_and_resets() {
+        let _g = guard();
+        reset_grid_entries();
+        assert_eq!(cumulative_grid_entries(), 0);
+
+        assert_eq!(add_grid_entries(100), 100);
+        assert_eq!(add_grid_entries(250), 350);
+        assert_eq!(cumulative_grid_entries(), 350);
+
+        reset_grid_entries();
+        assert_eq!(cumulative_grid_entries(), 0);
+
+        assert_eq!(add_grid_entries(1), 1);
+        reset_grid_entries();
+    }
+
+    #[test]
+    fn flags_do_not_interfere_with_each_other() {
+        let _g = guard();
+        disable_layout_eviction();
+        disable_streaming_mode();
+        disable_cell_memoize_bypass();
+        disable_table_level_bypass();
+
+        enable_streaming_mode();
+        assert!(is_streaming_mode());
+        assert!(!is_layout_eviction_enabled());
+        assert!(!is_cell_memoize_bypassed());
+        assert!(!is_table_level_bypassed());
+
+        enable_cell_memoize_bypass();
+        assert!(is_streaming_mode());
+        assert!(is_cell_memoize_bypassed());
+        assert!(!is_table_level_bypassed());
+
+        disable_streaming_mode();
+        disable_cell_memoize_bypass();
+    }
+
+    #[test]
+    fn heap_compact_helpers_do_not_panic() {
+        // On non-Windows these are no-ops; on Windows they must execute
+        // the underlying CRT/WinAPI calls cleanly. Either way the
+        // function must return without panicking.
+        let _g = guard();
+        compact_heap_and_trim_ws();
+        compact_heap_and_trim_ws_full();
+    }
+}
+
 /// Compact the heap on Windows without trimming the working set.
 ///
 /// After freeing large allocations (e.g., comemo eviction), the Windows heap
