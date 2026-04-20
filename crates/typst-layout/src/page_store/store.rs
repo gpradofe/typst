@@ -318,6 +318,127 @@ impl DiskPageStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use typst_library::foundations::{Content, Smart};
+    use typst_library::layout::{Abs, Frame, Size};
+
+    use super::*;
+
+    fn make_page(width: f64, height: f64, number: u64) -> Page {
+        let size = Size::new(Abs::pt(width), Abs::pt(height));
+        Page {
+            frame: Frame::soft(size),
+            fill: Smart::Auto,
+            numbering: None,
+            supplement: Content::empty(),
+            number,
+        }
+    }
+
+    #[test]
+    fn empty_store_reports_zero_pages() {
+        let store = DiskPageStore::new().expect("create store");
+        assert_eq!(store.page_count(), 0);
+    }
+
+    #[test]
+    fn from_pages_preserves_count_and_dimensions() {
+        let pages = vec![
+            make_page(100.0, 200.0, 1),
+            make_page(300.0, 400.0, 2),
+            make_page(500.0, 600.0, 3),
+        ];
+        let store = DiskPageStore::from_pages(&pages).expect("from_pages");
+        assert_eq!(store.page_count(), 3);
+
+        for (i, original) in pages.iter().enumerate() {
+            let got = store.read_page(i).expect("read_page");
+            assert_eq!(got.number, original.number);
+            assert_eq!(got.frame.width(), original.frame.width());
+            assert_eq!(got.frame.height(), original.frame.height());
+        }
+    }
+
+    #[test]
+    fn append_then_flush_then_iterate_returns_all_pages_in_order() {
+        let mut store = DiskPageStore::new().expect("create store");
+        let originals: Vec<_> =
+            (1..=5).map(|n| make_page(100.0 + n as f64, 200.0, n)).collect();
+
+        for page in &originals {
+            store.append_page(page).expect("append_page");
+        }
+        store.flush_writer().expect("flush_writer");
+
+        assert_eq!(store.page_count(), originals.len());
+
+        let got: Vec<_> = store
+            .pages_iter()
+            .expect("pages_iter")
+            .collect::<io::Result<Vec<_>>>()
+            .expect("iterate");
+
+        assert_eq!(got.len(), originals.len());
+        for (g, o) in got.iter().zip(&originals) {
+            assert_eq!(g.number, o.number);
+            assert_eq!(g.frame.width(), o.frame.width());
+        }
+    }
+
+    #[test]
+    fn read_page_out_of_range_errors() {
+        let pages = vec![make_page(100.0, 200.0, 1)];
+        let store = DiskPageStore::from_pages(&pages).expect("from_pages");
+
+        let err = store.read_page(5).expect_err("should error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn remaining_tags_inject_into_last_page_only() {
+        let mut store = DiskPageStore::from_pages(&[
+            make_page(100.0, 200.0, 1),
+            make_page(100.0, 200.0, 2),
+        ])
+        .expect("from_pages");
+
+        // No remaining tags: last page has no tag-only items.
+        let last_before = store.read_page(1).expect("read last before");
+        let tag_count_before = last_before
+            .frame
+            .items()
+            .filter(|(_, item)| matches!(item, FrameItem::Tag(_)))
+            .count();
+        assert_eq!(tag_count_before, 0);
+
+        // With remaining tags: injected only into the last page.
+        use typst_library::introspection::{Location, Tag, TagFlags};
+        let tag = Tag::End(
+            Location::new(0),
+            0,
+            TagFlags { introspectable: false, tagged: false },
+        );
+        store.set_remaining_tags(vec![tag]);
+
+        let first = store.read_page(0).expect("read first");
+        let first_tag_count = first
+            .frame
+            .items()
+            .filter(|(_, item)| matches!(item, FrameItem::Tag(_)))
+            .count();
+        assert_eq!(first_tag_count, 0);
+
+        let last = store.read_page(1).expect("read last");
+        let last_tag_count = last
+            .frame
+            .items()
+            .filter(|(_, item)| matches!(item, FrameItem::Tag(_)))
+            .count();
+        assert_eq!(last_tag_count, 1);
+    }
+}
+
 /// Sequential page iterator using a single buffered reader.
 /// Much faster than random-access `read_page` for sequential reads.
 pub struct SequentialPageIterator<'a> {

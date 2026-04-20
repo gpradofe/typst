@@ -290,6 +290,66 @@ pub fn convert_streaming_to_writer<W: std::io::Write>(
 }
 
 /// Reads pages one at a time from disk and converts them to PDF.
+/// Emits a single typst page as a krilla page on `document`.
+///
+/// Shared by both the in-memory and disk-backed export paths. The page
+/// index `i` is the pre-filtering (physical) index used to derive fallback
+/// page labels when some pages have been excluded from export.
+fn emit_page(
+    gc: &mut GlobalContext,
+    document: &mut Document,
+    typst_page: &typst_layout::Page,
+    i: usize,
+) -> SourceResult<()> {
+    // PDF 1.4 upwards to 1.7 specifies a minimum page size of 3x3 units.
+    // PDF 2.0 doesn't define an explicit limit, but krilla and some viewers
+    // don't handle zero-sized pages.
+    let mut settings = PageSettings::from_wh(
+        typst_page.frame.width().to_f32().max(3.0),
+        typst_page.frame.height().to_f32().max(3.0),
+    )
+    .expect_internal("invalid page size")
+    .at(Span::detached())?;
+
+    if let Some(label) = typst_page
+        .numbering
+        .as_ref()
+        .and_then(|num| PageLabel::generate(num, typst_page.number))
+        .or_else(|| {
+            // When some pages were excluded from export, show a page label
+            // carrying the real (not logical) page number so the resulting
+            // PDF still references the originals.
+            gc.page_index_converter
+                .has_skipped_pages()
+                .then(|| PageLabel::arabic((i + 1) as u64))
+        })
+    {
+        settings = settings.with_page_label(label);
+    }
+
+    let mut page = document.start_page_with(settings);
+    let mut surface = page.surface();
+    let page_idx = gc.page_index_converter.pdf_page_index(i);
+    let mut fc = FrameContext::new(page_idx, typst_page.frame.size());
+
+    tags::page(gc, &mut surface, |gc, surface| {
+        handle_frame(
+            &mut fc,
+            &typst_page.frame,
+            typst_page.fill_or_transparent(),
+            surface,
+            gc,
+        )
+    })?;
+
+    surface.finish();
+
+    let link_annotations = fc.link_annotations.into_values().flatten();
+    tags::add_link_annotations(gc, &mut page, link_annotations);
+
+    Ok(())
+}
+
 fn convert_pages_from_store(
     gc: &mut GlobalContext,
     document: &mut Document,
@@ -318,46 +378,7 @@ fn convert_pages_from_store(
             .map_err(|e| ecow::eco_format!("failed to read page {i} from store: {e}"))
             .at(Span::detached())?;
 
-        let mut settings = PageSettings::from_wh(
-            typst_page.frame.width().to_f32().max(3.0),
-            typst_page.frame.height().to_f32().max(3.0),
-        )
-        .expect_internal("invalid page size")
-        .at(Span::detached())?;
-
-        if let Some(label) = typst_page
-            .numbering
-            .as_ref()
-            .and_then(|num| PageLabel::generate(num, typst_page.number))
-            .or_else(|| {
-                gc.page_index_converter
-                    .has_skipped_pages()
-                    .then(|| PageLabel::arabic((i + 1) as u64))
-            })
-        {
-            settings = settings.with_page_label(label);
-        }
-
-        let mut page = document.start_page_with(settings);
-        let mut surface = page.surface();
-        let page_idx = gc.page_index_converter.pdf_page_index(i);
-        let mut fc = FrameContext::new(page_idx, typst_page.frame.size());
-
-        tags::page(gc, &mut surface, |gc, surface| {
-            handle_frame(
-                &mut fc,
-                &typst_page.frame,
-                typst_page.fill_or_transparent(),
-                surface,
-                gc,
-            )
-        })?;
-
-        surface.finish();
-
-        let link_annotations = fc.link_annotations.into_values().flatten();
-        tags::add_link_annotations(gc, &mut page, link_annotations);
-
+        emit_page(gc, document, &typst_page, i)?;
         // typst_page is dropped here — frame memory freed
     }
 
@@ -383,56 +404,7 @@ fn convert_pages(
             continue;
         }
 
-        // PDF 1.4 upwards to 1.7 specifies a minimum page size of 3x3 units.
-        // PDF 2.0 doesn't define an explicit limit, but krilla and probably
-        // some viewers won't handle pages that have zero sized pages.
-        let mut settings = PageSettings::from_wh(
-            typst_page.frame.width().to_f32().max(3.0),
-            typst_page.frame.height().to_f32().max(3.0),
-        )
-        .expect_internal("invalid page size")
-        .at(Span::detached())?;
-
-        if let Some(label) = typst_page
-            .numbering
-            .as_ref()
-            .and_then(|num| PageLabel::generate(num, typst_page.number))
-            .or_else(|| {
-                // When some pages were ignored from export, we show a page label with
-                // the correct real (not logical) page number.
-                // This is for consistency with normal output when pages have no numbering
-                // and all are exported: the final PDF page numbers always correspond to
-                // the real (not logical) page numbers. Here, the final PDF page number
-                // will differ, but we can at least use labels to indicate what was
-                // the corresponding real page number in the Typst document.
-                gc.page_index_converter
-                    .has_skipped_pages()
-                    .then(|| PageLabel::arabic((i + 1) as u64))
-            })
-        {
-            settings = settings.with_page_label(label);
-        }
-
-        let mut page = document.start_page_with(settings);
-        let mut surface = page.surface();
-        let page_idx = gc.page_index_converter.pdf_page_index(i);
-        let mut fc = FrameContext::new(page_idx, typst_page.frame.size());
-
-        tags::page(gc, &mut surface, |gc, surface| {
-            handle_frame(
-                &mut fc,
-                &typst_page.frame,
-                typst_page.fill_or_transparent(),
-                surface,
-                gc,
-            )
-        })?;
-
-        surface.finish();
-
-        let link_annotations = fc.link_annotations.into_values().flatten();
-        tags::add_link_annotations(gc, &mut page, link_annotations);
-
+        emit_page(gc, document, &typst_page, i)?;
         // typst_page is dropped here, freeing the Frame and all its items
     }
 
