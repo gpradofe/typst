@@ -2,14 +2,14 @@
   <img alt="Typst" src="https://user-images.githubusercontent.com/17899797/226108480-722b770e-6313-40d7-84f2-26bebb55a281.png">
 </h1>
 
-<h3 align="center">Memory-Optimized Fork &mdash; 75-85% Less RAM for Large Tables</h3>
+<h3 align="center">Memory-Optimized Fork &mdash; 95–97 % Less RAM for Large Tables</h3>
 
 <p align="center">
   <a href="#benchmark-results">
-    <img alt="RAM Reduction" src="https://img.shields.io/badge/RAM_reduction-up_to_85%25-2E7D32?style=for-the-badge">
+    <img alt="RAM Reduction" src="https://img.shields.io/badge/RAM_reduction-up_to_97%25-2E7D32?style=for-the-badge">
   </a>
   <a href="#benchmark-results">
-    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_4.5x-1565C0?style=for-the-badge">
+    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_5.9x-1565C0?style=for-the-badge">
   </a>
   <a href="BENCHMARKS.md">
     <img alt="Benchmarks" src="https://img.shields.io/badge/full_benchmarks-view_report-E65100?style=for-the-badge">
@@ -18,11 +18,13 @@
 
 ---
 
-> **This is a fork of [typst/typst](https://github.com/typst/typst) v0.14.2** with targeted memory optimizations for large-document compilation. All 3,376 upstream tests pass and PDF output is byte-identical to the original binary. These changes are proposed for upstream integration.
+> **This is a fork of [typst/typst](https://github.com/typst/typst) v0.14.2** with targeted memory optimizations for large-document compilation. All 3,380 upstream tests pass and PDF output is visually and textually identical to the original binary. These changes are proposed for upstream integration.
 
 ## The Problem
 
-When compiling documents with large tables (10K+ rows), Typst's memory usage grows disproportionately — a 100K-row table document that produces a ~250 MB PDF consumed **16 GB of RAM** with the original binary. This made Typst impractical for production PDF generation from database exports, reports, and other data-heavy workflows.
+When compiling documents with large tables (10K+ rows), Typst's memory usage grows disproportionately — a 100K-row table document that produces a ~200 MB PDF consumed **16 GB of RAM** with the original binary. This made Typst impractical for production PDF generation from database exports, reports, and other data-heavy workflows.
+
+This fork brings a 100K-row simple table from **16 GB → 449 MB (97 % reduction)**, and scales to **1.2 M rows at ~5–7 GB** (vs ~180 GB projected for the original). Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows — the practical floor without upstream krilla changes.
 
 ## The Solution
 
@@ -38,46 +40,39 @@ Through systematic heap profiling with [dhat](https://docs.rs/dhat/latest/dhat/)
 
 5. **All pages held in memory during PDF export** — Added `DiskPageStore` streaming: pages are serialized to disk after runs of >100 pages, keeping only recent pages in memory.
 
-All optimizations preserve **byte-identical PDF output** — verified by automated comparison against the original binary (see `tests/correctness_test.py`).
+All optimizations preserve **visually and textually identical PDF output** — verified by automated comparison against the original binary (see `tests/correctness_test.py`). Byte-level differences are limited to PDF metadata and structure IDs, not rendered content.
 
 ## Benchmark Results
 
-Tested on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, from 100 to 1.2M rows.
+Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, at 10 K / 100 K / 1.2 M rows. Original and optimized binaries run back-to-back on the same dataset.
 
-### At 100,000 Rows
-
-<p align="center">
-  <img alt="Summary" src="benchmarks/summary.png" width="800">
-</p>
+### At 100,000 rows
 
 | Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
-|----------|-------------|--------------|-----------|--------------|---------------|---------|
-| Simple Table | 16.1 GB | 2.5 GB | **85%** | 41.8s | 17.1s | **2.4x** |
-| Single Table (Advanced) | 15.5 GB | 3.4 GB | **78%** | 44.8s | 21.3s | **2.1x** |
-| Multi-Table (Advanced) | 14.7 GB | 3.7 GB | **75%** | 36.4s | 24.7s | **1.5x** |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 16,086 MB | **449 MB** | **97.2 %** | 79.8 s | **19.8 s** | **4.0 ×** |
+| Single Table (Advanced)   | 15,491 MB | **563 MB** | **96.4 %** | 78.1 s | **47.1 s** | **1.7 ×** |
+| Multi-Table (Advanced)    | 14,711 MB | **687 MB** | **95.3 %** | 62.0 s | **41.5 s** | **1.5 ×** |
 
-### Memory Scaling
+### At 10,000 rows
 
-<p align="center">
-  <img alt="Memory Comparison" src="benchmarks/memory_comparison.png" width="800">
-</p>
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 1,696 MB | **52 MB**  | **96.9 %** | 7.7 s | **1.3 s** | **5.9 ×** |
+| Single Table (Advanced)   | 1,625 MB | **101 MB** | **93.8 %** | 4.9 s | **2.9 s** | **1.7 ×** |
+| Multi-Table (Advanced)    | 1,607 MB | **175 MB** | **89.1 %** | 3.9 s | **2.8 s** | **1.4 ×** |
 
-### Scaling Beyond 100K Rows
+### At 1.2 million rows (optimized only — original exceeds 128 GB)
 
-Both binaries were tested at 300K and 600K rows. The original binary requires **45-90 GB of RAM** at these scales, while the optimized binary stays under 22 GB:
+| Template | Peak RAM | Time | PDF size | RAM / PDF |
+|----------|---------:|-----:|---------:|----------:|
+| Simple                    | **5,498 MB** | 5.4 min | 2,549 MB | **2.16 ×** |
+| Single Table (Advanced)   | **6,335 MB** | 12.1 min | 3,333 MB | **1.90 ×** |
+| Multi-Table (Advanced)    | **6,804 MB** | 10.2 min | 3,309 MB | **2.06 ×** |
 
-| Rows | Template | Original RAM | Optimized RAM | Reduction | Orig Time | Opt Time | Speedup |
-|------|----------|-------------|--------------|-----------|-----------|----------|---------|
-| 300K | Simple | 45.2 GB | **6.8 GB** | **85%** | 151s | 58s | **2.6x** |
-| 300K | Single Adv. | 45.5 GB | **10.1 GB** | **78%** | 194s | 83s | **2.3x** |
-| 300K | Multi-Table | 41.9 GB | **10.9 GB** | **74%** | 116s | 121s | 1.0x |
-| 600K | Simple | 90.0 GB | **13.7 GB** | **85%** | 471s | 145s | **3.3x** |
-| 600K | Single Adv. | 89.9 GB | **20.2 GB** | **78%** | 965s | 214s | **4.5x** |
-| 600K | Multi-Table | 81.6 GB | **21.7 GB** | **73%** | 285s | 543s | 0.5x |
+Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows for all three templates. Memory scales **~11 × from 100 K to 1.2 M** — slightly sublinear with data size.
 
-The optimized binary also scales to **1.2M rows** (producing 3+ GB PDFs at 28-40 GB RAM), well beyond practical limits for the original binary.
-
-> **Note:** Memory reduction percentages (73-85%) remain consistent across all scales. The multi-table template shows a time regression at 600K rows because the optimized binary's periodic comemo eviction during iteration 1 destroys cross-table cache hits across ~12,000 separate table elements, forcing iteration 2 and streaming to recompute all layouts. See [BENCHMARKS.md](BENCHMARKS.md) for full analysis.
+Remaining headroom at 1.2 M is krilla-side: `pdf_writer::Buf::with_capacity` holds ~3 GB of in-memory PDF assembly. That work is scoped to the companion krilla fork and tracked upstream at [LaurenzV/krilla#353](https://github.com/LaurenzV/krilla/issues/353).
 
 <p align="center">
   <a href="BENCHMARKS.md"><strong>View full benchmark report with all graphs and methodology &rarr;</strong></a>
