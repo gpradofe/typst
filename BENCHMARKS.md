@@ -28,6 +28,30 @@ Data captured: **2026-04-22**.
 | Multi-Table (Advanced) — Peak RAM | 1,607 MB | **175 MB** | **89.1 % reduction** |
 | Multi-Table (Advanced) — Time | 3.9 s | **2.8 s** | **1.4 × faster** |
 
+### At 300,000 rows
+
+| Metric | Original | Optimized | Delta |
+|--------|----------|-----------|-------|
+| **Simple Table** — Peak RAM | 45,160 MB | **1,268 MB** | **97.2 % reduction** |
+| **Simple Table** — Time | 267.3 s | **66.4 s** | **4.0 × faster** |
+| **Single Table (Advanced)** — Peak RAM | 45,469 MB | **1,608 MB** | **96.5 % reduction** |
+| **Single Table (Advanced)** — Time | 299.5 s | **154.1 s** | **1.9 × faster** |
+| **Multi-Table (Advanced)** — Peak RAM | 41,940 MB | **1,748 MB** | **95.8 % reduction** |
+| **Multi-Table (Advanced)** — Time | 184.2 s | **133.8 s** | **1.4 × faster** |
+
+### At 600,000 rows
+
+| Metric | Original | Optimized | Delta |
+|--------|----------|-----------|-------|
+| **Simple Table** — Peak RAM | 89,969 MB | **2,741 MB** | **97.0 % reduction** |
+| **Simple Table** — Time | 733.5 s | **142.1 s** | **5.2 × faster** |
+| **Single Table (Advanced)** — Peak RAM | 89,857 MB | **3,177 MB** | **96.5 % reduction** |
+| **Single Table (Advanced)** — Time | 1,269.1 s | **322.9 s** | **3.9 × faster** |
+| **Multi-Table (Advanced)** — Peak RAM | 81,549 MB | **3,393 MB** | **95.8 % reduction** |
+| **Multi-Table (Advanced)** — Time | 419.7 s | **277.3 s** | **1.5 × faster** |
+
+At 600 K rows the original binary requires **~90 GB of RAM** (pushing a 128 GB workstation to its limit). The fork runs the same workload in **~3 GB** with 1.5–5.2 × speedup.
+
 ### At 1.2 million rows (optimized only — original exceeds 128 GB)
 
 | Template | Peak RAM | Time | PDF size | RAM / PDF ratio |
@@ -40,13 +64,15 @@ Data captured: **2026-04-22**.
 
 ## Scaling summary
 
-| Rows | Simple RAM | Single-Adv RAM | Multi-Table RAM |
-|-----:|-----------:|---------------:|----------------:|
-| 10 K | 52 MB | 101 MB | 175 MB |
-| 100 K | 449 MB | 563 MB | 687 MB |
-| 1.2 M | 5,498 MB | 6,335 MB | 6,804 MB |
+| Rows | Simple RAM | Single-Adv RAM | Multi-Table RAM | Simple time | Single-Adv time | Multi-Table time |
+|-----:|-----------:|---------------:|----------------:|------------:|----------------:|-----------------:|
+| 10 K | 52 MB | 101 MB | 175 MB | 1.3 s | 2.9 s | 2.8 s |
+| 100 K | 449 MB | 563 MB | 687 MB | 19.8 s | 47.1 s | 41.5 s |
+| 300 K | 1,268 MB | 1,608 MB | 1,748 MB | 66.4 s | 154.1 s | 133.8 s |
+| 600 K | 2,741 MB | 3,177 MB | 3,393 MB | 142.1 s | 322.9 s | 277.3 s |
+| 1.2 M | 5,498 MB | 6,335 MB | 6,804 MB | 325.6 s | 725.3 s | 610.3 s |
 
-100 K → 1.2 M scaling factor averages **~11 ×** (versus 12 × data growth), i.e. memory scales slightly sublinearly.
+Memory scales **~11 × from 100 K to 1.2 M** (vs 12 × data growth) — slightly sublinear. Wall time scales close to linearly at lower ranges and slightly super-linearly at 1.2 M due to allocator pressure at multi-GB RSS.
 
 ## What was optimized
 
