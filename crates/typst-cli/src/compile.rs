@@ -35,7 +35,9 @@ pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
     let mut timer = Timer::new_or_placeholder(command.args.timings.clone());
     let mut config = CompileConfig::new(command)?;
     if let Some(mode) = progress_mode(&command.args.progress, command.args.verbose) {
-        typst::progress::install(std::sync::Arc::new(crate::progress::CliSink::new(mode)));
+        typst::progress::install(std::sync::Arc::new(crate::progress::CliSink::new(
+            mode,
+        )));
     }
     let mut world = SystemWorld::new(
         Some(&command.args.input),
@@ -429,7 +431,9 @@ fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResu
             .map_err(|err| eco_format!("failed to open output file ({err})"))
             .at(Span::detached())?;
         typst_pdf::pdf_streaming_to_writer(&mut document, &options, store, writer)?;
-        typst::progress::report(typst::progress::Event::Wrote { bytes: output_size(&config.output) });
+        typst::progress::report(typst::progress::Event::Wrote {
+            bytes: output_size(&config.output),
+        });
     } else {
         let buffer = typst_pdf::pdf(document, &options)?;
         config
@@ -437,7 +441,9 @@ fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResu
             .write(&buffer)
             .map_err(|err| eco_format!("failed to write PDF file ({err})"))
             .at(Span::detached())?;
-        typst::progress::report(typst::progress::Event::Wrote { bytes: buffer.len() as u64 });
+        typst::progress::report(typst::progress::Event::Wrote {
+            bytes: buffer.len() as u64,
+        });
     };
     Ok(())
 }

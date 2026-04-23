@@ -77,7 +77,8 @@ impl Sink for CliSink {
                 }
                 Event::Wrote { bytes } => {
                     let human = human_bytes(*bytes);
-                    let _ = writeln!(out, "[typst {elapsed:>5.2}s] wrote output ({human})");
+                    let _ =
+                        writeln!(out, "[typst {elapsed:>5.2}s] wrote output ({human})");
                 }
             }
         }
@@ -86,9 +87,10 @@ impl Sink for CliSink {
             let percent = percent_for(&event);
             let should_print = match &event {
                 // Always print stage boundaries and the final write line.
-                Event::Stage(_) | Event::Iteration(_) | Event::Pages(_) | Event::Wrote { .. } => {
-                    percent as i16 != state.last_percent
-                }
+                Event::Stage(_)
+                | Event::Iteration(_)
+                | Event::Pages(_)
+                | Event::Wrote { .. } => percent as i16 != state.last_percent,
                 // For page-by-page export, only print when the integer
                 // percentage actually advances.
                 Event::PageEmitted { .. } => percent as i16 > state.last_percent,
@@ -96,10 +98,8 @@ impl Sink for CliSink {
             if should_print {
                 state.last_percent = percent as i16;
                 let suffix = describe(&event);
-                let _ = writeln!(
-                    out,
-                    "[progress {elapsed:>5.2}s] {percent:>3}% {suffix}",
-                );
+                let _ =
+                    writeln!(out, "[progress {elapsed:>5.2}s] {percent:>3}% {suffix}",);
             }
         }
     }
@@ -211,9 +211,6 @@ mod tests {
             describe(&Event::PageEmitted { done: 10, total: 237 }),
             "export 10/237",
         );
-        assert_eq!(
-            describe(&Event::Wrote { bytes: 1024 * 1024 }),
-            "wrote (1.0 MB)",
-        );
+        assert_eq!(describe(&Event::Wrote { bytes: 1024 * 1024 }), "wrote (1.0 MB)",);
     }
 }
