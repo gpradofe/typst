@@ -226,16 +226,8 @@ fn test_verbose_flag_emits_stages() {
 fn test_progress_and_verbose_combine() {
     let project = tempfs();
     let main = project.write("main.typ", "= Hello");
-    let output = exec()
-        .arg("compile")
-        .arg(&main)
-        .arg("-p")
-        .arg("-v")
-        .must_succeed();
-    output
-        .stderr
-        .must_contain("[progress")
-        .must_contain("[typst");
+    let output = exec().arg("compile").arg(&main).arg("-p").arg("-v").must_succeed();
+    output.stderr.must_contain("[progress").must_contain("[typst");
 }
 
 #[test]
