@@ -44,7 +44,7 @@ All optimizations preserve **visually and textually identical PDF output** — v
 
 ## Benchmark Results
 
-Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, at 10 K / 100 K / 1.2 M rows. Original and optimized binaries run back-to-back on the same dataset.
+Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, at 10 K / 100 K / 300 K / 600 K / 1.2 M rows. Original and optimized binaries run back-to-back on the same dataset.
 
 ### At 100,000 rows
 
@@ -62,6 +62,24 @@ Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB
 | Single Table (Advanced)   | 1,625 MB | **101 MB** | **93.8 %** | 4.9 s | **2.9 s** | **1.7 ×** |
 | Multi-Table (Advanced)    | 1,607 MB | **175 MB** | **89.1 %** | 3.9 s | **2.8 s** | **1.4 ×** |
 
+### At 300,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 45,160 MB | **1,268 MB** | **97.2 %** | 267.3 s | **66.4 s**  | **4.0 ×** |
+| Single Table (Advanced)   | 45,469 MB | **1,608 MB** | **96.5 %** | 299.5 s | **154.1 s** | **1.9 ×** |
+| Multi-Table (Advanced)    | 41,940 MB | **1,748 MB** | **95.8 %** | 184.2 s | **133.8 s** | **1.4 ×** |
+
+### At 600,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 89,969 MB | **2,741 MB** | **97.0 %** | 733.5 s  | **142.1 s** | **5.2 ×** |
+| Single Table (Advanced)   | 89,857 MB | **3,177 MB** | **96.5 %** | 1,269.1 s | **322.9 s** | **3.9 ×** |
+| Multi-Table (Advanced)    | 81,549 MB | **3,393 MB** | **95.8 %** | 419.7 s  | **277.3 s** | **1.5 ×** |
+
+At 600 K rows the original binary needs **~90 GB of RAM** (pushing a 128 GB workstation to its limit). The fork runs the same workload in **~3 GB** with 1.5–5.2 × speedup.
+
 ### At 1.2 million rows (optimized only — original exceeds 128 GB)
 
 | Template | Peak RAM | Time | PDF size | RAM / PDF |
@@ -70,7 +88,7 @@ Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB
 | Single Table (Advanced)   | **6,335 MB** | 12.1 min | 3,333 MB | **1.90 ×** |
 | Multi-Table (Advanced)    | **6,804 MB** | 10.2 min | 3,309 MB | **2.06 ×** |
 
-Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows for all three templates. Memory scales **~11 × from 100 K to 1.2 M** — slightly sublinear with data size.
+Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows for all three templates. Memory scales **~11 × from 100 K to 1.2 M** — slightly sublinear with data size. The original binary is projected to need ~180 GB for the same workload.
 
 Remaining headroom at 1.2 M is krilla-side: `pdf_writer::Buf::with_capacity` holds ~3 GB of in-memory PDF assembly. That work is scoped to the companion krilla fork and tracked upstream at [LaurenzV/krilla#353](https://github.com/LaurenzV/krilla/issues/353).
 
