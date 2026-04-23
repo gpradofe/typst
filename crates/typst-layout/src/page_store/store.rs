@@ -318,6 +318,56 @@ impl DiskPageStore {
     }
 }
 
+/// Sequential page iterator using a single buffered reader.
+/// Much faster than random-access `read_page` for sequential reads.
+pub struct SequentialPageIterator<'a> {
+    store: &'a DiskPageStore,
+    reader: io::BufReader<std::fs::File>,
+    index: usize,
+}
+
+impl Iterator for SequentialPageIterator<'_> {
+    type Item = io::Result<Page>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.store.page_count {
+            return None;
+        }
+
+        let is_last = self.index == self.store.page_count - 1;
+        let result = (|| -> io::Result<Page> {
+            let mut len_bytes = [0u8; 8];
+            self.reader.read_exact(&mut len_bytes)?;
+            let len = u64::from_le_bytes(len_bytes) as usize;
+
+            let mut buf = vec![0u8; len];
+            self.reader.read_exact(&mut buf)?;
+
+            let spage: SPage = bincode::deserialize(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let mut page = self.store.reconstruct_page(spage);
+
+            // Inject remaining tags into the last page.
+            if is_last && !self.store.remaining_tags.is_empty() {
+                let pos = Point::with_y(page.frame.height());
+                page.frame.push_multiple(
+                    self.store
+                        .remaining_tags
+                        .iter()
+                        .cloned()
+                        .map(|tag| (pos, FrameItem::Tag(tag))),
+                );
+            }
+
+            Ok(page)
+        })();
+
+        self.index += 1;
+        Some(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use typst_library::foundations::{Content, Smart};
@@ -436,55 +486,5 @@ mod tests {
             .filter(|(_, item)| matches!(item, FrameItem::Tag(_)))
             .count();
         assert_eq!(last_tag_count, 1);
-    }
-}
-
-/// Sequential page iterator using a single buffered reader.
-/// Much faster than random-access `read_page` for sequential reads.
-pub struct SequentialPageIterator<'a> {
-    store: &'a DiskPageStore,
-    reader: io::BufReader<std::fs::File>,
-    index: usize,
-}
-
-impl Iterator for SequentialPageIterator<'_> {
-    type Item = io::Result<Page>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.store.page_count {
-            return None;
-        }
-
-        let is_last = self.index == self.store.page_count - 1;
-        let result = (|| -> io::Result<Page> {
-            let mut len_bytes = [0u8; 8];
-            self.reader.read_exact(&mut len_bytes)?;
-            let len = u64::from_le_bytes(len_bytes) as usize;
-
-            let mut buf = vec![0u8; len];
-            self.reader.read_exact(&mut buf)?;
-
-            let spage: SPage = bincode::deserialize(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-            let mut page = self.store.reconstruct_page(spage);
-
-            // Inject remaining tags into the last page.
-            if is_last && !self.store.remaining_tags.is_empty() {
-                let pos = Point::with_y(page.frame.height());
-                page.frame.push_multiple(
-                    self.store
-                        .remaining_tags
-                        .iter()
-                        .cloned()
-                        .map(|tag| (pos, FrameItem::Tag(tag))),
-                );
-            }
-
-            Ok(page)
-        })();
-
-        self.index += 1;
-        Some(result)
     }
 }
