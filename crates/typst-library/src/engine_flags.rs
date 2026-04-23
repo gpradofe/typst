@@ -119,6 +119,63 @@ pub fn is_table_level_bypassed() -> bool {
 /// Set to 8M to exempt 600K while catching 1.2M+.
 pub const TABLE_CACHE_ENTRY_LIMIT: usize = 8_000_000;
 
+/// Compact the heap on Windows without trimming the working set.
+///
+/// After freeing large allocations (e.g., comemo eviction), the Windows heap
+/// retains freed pages. `_heapmin` returns free CRT blocks to the OS and
+/// `HeapCompact` coalesces free blocks. Unlike `compact_heap_and_trim_ws_full`,
+/// this does NOT call `SetProcessWorkingSetSize`, avoiding expensive page
+/// faults on actively-used memory (e.g., the 267 MB eval Content tree).
+///
+/// On non-Windows platforms, this is a no-op.
+#[inline]
+pub fn compact_heap_and_trim_ws() {
+    #[cfg(windows)]
+    unsafe {
+        unsafe extern "system" {
+            fn GetProcessHeap() -> *mut core::ffi::c_void;
+            fn HeapCompact(heap: *mut core::ffi::c_void, flags: u32) -> usize;
+        }
+        unsafe extern "C" {
+            fn _heapmin() -> i32;
+        }
+        let _ = _heapmin();
+        HeapCompact(GetProcessHeap(), 0);
+    }
+}
+
+/// Full heap compaction + working set trim on Windows.
+///
+/// Calls `_heapmin`, `HeapCompact`, and `SetProcessWorkingSetSize` to
+/// aggressively release memory back to the OS. Only use at major boundaries
+/// (post-eval, between convergence iterations) where the subsequent work
+/// pattern accesses different memory — NOT during layout where the Content
+/// tree is continuously accessed.
+///
+/// On non-Windows platforms, this is a no-op.
+#[inline]
+pub fn compact_heap_and_trim_ws_full() {
+    #[cfg(windows)]
+    unsafe {
+        unsafe extern "system" {
+            fn GetProcessHeap() -> *mut core::ffi::c_void;
+            fn HeapCompact(heap: *mut core::ffi::c_void, flags: u32) -> usize;
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn SetProcessWorkingSetSize(
+                process: *mut core::ffi::c_void,
+                min: usize,
+                max: usize,
+            ) -> i32;
+        }
+        unsafe extern "C" {
+            fn _heapmin() -> i32;
+        }
+        let _ = _heapmin();
+        HeapCompact(GetProcessHeap(), 0);
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, MutexGuard};
@@ -224,62 +281,5 @@ mod tests {
         let _g = guard();
         compact_heap_and_trim_ws();
         compact_heap_and_trim_ws_full();
-    }
-}
-
-/// Compact the heap on Windows without trimming the working set.
-///
-/// After freeing large allocations (e.g., comemo eviction), the Windows heap
-/// retains freed pages. `_heapmin` returns free CRT blocks to the OS and
-/// `HeapCompact` coalesces free blocks. Unlike `compact_heap_and_trim_ws_full`,
-/// this does NOT call `SetProcessWorkingSetSize`, avoiding expensive page
-/// faults on actively-used memory (e.g., the 267 MB eval Content tree).
-///
-/// On non-Windows platforms, this is a no-op.
-#[inline]
-pub fn compact_heap_and_trim_ws() {
-    #[cfg(windows)]
-    unsafe {
-        unsafe extern "system" {
-            fn GetProcessHeap() -> *mut core::ffi::c_void;
-            fn HeapCompact(heap: *mut core::ffi::c_void, flags: u32) -> usize;
-        }
-        unsafe extern "C" {
-            fn _heapmin() -> i32;
-        }
-        let _ = _heapmin();
-        HeapCompact(GetProcessHeap(), 0);
-    }
-}
-
-/// Full heap compaction + working set trim on Windows.
-///
-/// Calls `_heapmin`, `HeapCompact`, and `SetProcessWorkingSetSize` to
-/// aggressively release memory back to the OS. Only use at major boundaries
-/// (post-eval, between convergence iterations) where the subsequent work
-/// pattern accesses different memory — NOT during layout where the Content
-/// tree is continuously accessed.
-///
-/// On non-Windows platforms, this is a no-op.
-#[inline]
-pub fn compact_heap_and_trim_ws_full() {
-    #[cfg(windows)]
-    unsafe {
-        unsafe extern "system" {
-            fn GetProcessHeap() -> *mut core::ffi::c_void;
-            fn HeapCompact(heap: *mut core::ffi::c_void, flags: u32) -> usize;
-            fn GetCurrentProcess() -> *mut core::ffi::c_void;
-            fn SetProcessWorkingSetSize(
-                process: *mut core::ffi::c_void,
-                min: usize,
-                max: usize,
-            ) -> i32;
-        }
-        unsafe extern "C" {
-            fn _heapmin() -> i32;
-        }
-        let _ = _heapmin();
-        HeapCompact(GetProcessHeap(), 0);
-        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
