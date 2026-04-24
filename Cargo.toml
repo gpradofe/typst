@@ -50,7 +50,7 @@ clap_mangen = "0.2.10"
 codespan-reporting = "0.11"
 codex = { git = "https://github.com/typst/codex", rev = "231b9d5" }
 color-print = "0.3.6"
-comemo = { path = "comemo-local" }
+comemo = { git = "https://github.com/gpradofe/comemo.git", rev = "59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4" }
 csv = "1"
 ctrlc = "3.4.1"
 dhat = "0.3"
@@ -80,8 +80,8 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b" }
+krilla = { git = "https://github.com/gpradofe/krilla.git", rev = "64fa5dcbe3b4d41ddb9846480149710d9cae3cc8", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { git = "https://github.com/gpradofe/krilla.git", rev = "64fa5dcbe3b4d41ddb9846480149710d9cae3cc8" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
@@ -191,5 +191,5 @@ pre-build = [
 ]
 
 [patch.crates-io]
-comemo = { path = "comemo-local" }
-pdf-writer = { git = "https://github.com/gpradofe/krilla.git", rev = "47b463b" }
+comemo = { git = "https://github.com/gpradofe/comemo.git", rev = "59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4" }
+pdf-writer = { git = "https://github.com/gpradofe/pdf-writer.git", rev = "afc2a1ac70b50eea552aa0fae90eac82cbb506d6" }
