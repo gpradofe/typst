@@ -487,7 +487,7 @@ checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
 [[package]]
 name = "comemo"
 version = "0.5.1"
-source = "git+https://github.com/gpradofe/comemo.git?rev=59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4#59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4"
+source = "git+https://github.com/gpradofe/comemo.git?rev=4ae924104ea99b41769d7be6f6c926164aa634d7#4ae924104ea99b41769d7be6f6c926164aa634d7"
 dependencies = [
  "comemo-macros",
  "parking_lot",
@@ -499,7 +499,7 @@ dependencies = [
 [[package]]
 name = "comemo-macros"
 version = "0.5.1"
-source = "git+https://github.com/gpradofe/comemo.git?rev=59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4#59358f25e41abfa8dec5e76ffb1bc54e6c9bd2a4"
+source = "git+https://github.com/gpradofe/comemo.git?rev=4ae924104ea99b41769d7be6f6c926164aa634d7#4ae924104ea99b41769d7be6f6c926164aa634d7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1477,7 +1477,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.6.0"
-source = "git+https://github.com/gpradofe/krilla.git?rev=64fa5dcbe3b4d41ddb9846480149710d9cae3cc8#64fa5dcbe3b4d41ddb9846480149710d9cae3cc8"
+source = "git+https://github.com/gpradofe/krilla.git?rev=95582e34ffc0be97a593c3328878ccb615f53715#95582e34ffc0be97a593c3328878ccb615f53715"
 dependencies = [
  "base64",
  "bumpalo",
@@ -1508,7 +1508,7 @@ dependencies = [
 [[package]]
 name = "krilla-svg"
 version = "0.3.0"
-source = "git+https://github.com/gpradofe/krilla.git?rev=64fa5dcbe3b4d41ddb9846480149710d9cae3cc8#64fa5dcbe3b4d41ddb9846480149710d9cae3cc8"
+source = "git+https://github.com/gpradofe/krilla.git?rev=95582e34ffc0be97a593c3328878ccb615f53715#95582e34ffc0be97a593c3328878ccb615f53715"
 dependencies = [
  "flate2",
  "fontdb",
@@ -1986,7 +1986,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 [[package]]
 name = "pdf-writer"
 version = "0.14.0"
-source = "git+https://github.com/gpradofe/pdf-writer.git?rev=afc2a1ac70b50eea552aa0fae90eac82cbb506d6#afc2a1ac70b50eea552aa0fae90eac82cbb506d6"
+source = "git+https://github.com/gpradofe/pdf-writer.git?rev=9f738764a0db29474d366f3761c98c8a9a03d30a#9f738764a0db29474d366f3761c98c8a9a03d30a"
 dependencies = [
  "bitflags 2.9.1",
  "itoa",
