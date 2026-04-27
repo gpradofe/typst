@@ -53,6 +53,7 @@ pub fn convert(
         configuration: options.standards.config,
         enable_tagging: options.tagged,
         render_svg_glyph_fn: render_svg_glyph,
+        pretty: false,
     };
 
     let mut document = Document::new_with(settings);
@@ -116,6 +117,7 @@ pub fn convert_streaming(
         configuration: options.standards.config,
         enable_tagging: options.tagged,
         render_svg_glyph_fn: render_svg_glyph,
+        pretty: false,
     };
 
     let mut document = Document::new_with(settings);
@@ -205,6 +207,7 @@ pub fn convert_streaming_to_writer<W: std::io::Write>(
         configuration: options.standards.config,
         enable_tagging: options.tagged,
         render_svg_glyph_fn: render_svg_glyph,
+        pretty: false,
     };
 
     let mut document = Document::new_with(settings);
@@ -735,6 +738,13 @@ fn handle_krilla_error<T>(
         }
         KrillaError::Io(msg) => {
             bail!(Span::detached(), "I/O error during PDF export: {msg}");
+        }
+        KrillaError::Limit(le) => {
+            bail!(
+                Span::detached(),
+                "the document exceeds a PDF limit ({le:?})";
+                hint: "reduce the document complexity or raise the export target version";
+            );
         }
     }
 }

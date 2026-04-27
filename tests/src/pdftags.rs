@@ -103,22 +103,32 @@ pub fn format(doc: &[u8]) -> StrResult<String> {
         .zip(page_refs)
         .map(|((idx, page), page_ref)| {
             let page_ref = page_ref?;
-            let marked_content = page
-                .typed_operations()
-                .filter_map(|op| match op {
+            // hayro_syntax 0.6's TypedIter doesn't impl Iterator (its next()
+            // returns a borrow with a non-'static lifetime). Drain it
+            // manually.
+            let mut marked_content = Vec::new();
+            let mut iter = page.typed_operations();
+            while let Some(op) = iter.next() {
+                let entry = match op {
                     TypedInstruction::MarkedContentPointWithProperties(mc) => {
-                        let props = mc.1.into_dict()?;
-                        let mcid = props.get(keys::MCID)?;
+                        let props = mc.1.clone().into_dict();
+                        let Some(props) = props else { continue };
+                        let Some(mcid) = props.get(keys::MCID) else { continue };
                         Some((mcid, MarkedContent { props }))
                     }
                     TypedInstruction::BeginMarkedContentWithProperties(mc) => {
-                        let props = mc.1.into_dict()?;
-                        let mcid = props.get(keys::MCID)?;
+                        let props = mc.1.clone().into_dict();
+                        let Some(props) = props else { continue };
+                        let Some(mcid) = props.get(keys::MCID) else { continue };
                         Some((mcid, MarkedContent { props }))
                     }
                     _ => None,
-                })
-                .collect();
+                };
+                if let Some(e) = entry {
+                    marked_content.push(e);
+                }
+            }
+            let marked_content: HashMap<_, _> = marked_content.into_iter().collect();
 
             Ok((page_ref, PageContent { idx, marked_content }))
         })
@@ -446,9 +456,9 @@ fn format_str(f: &mut Formatter, val: &Object) -> Result<(), ()> {
     const UTF_16_BE_BOM: [u8; 2] = *b"\xFE\xFF";
 
     let Object::String(val) = val else { return Err(()) };
-    let bytes = val.get();
+    let bytes = val.as_bytes();
 
-    if let Some(data) = bytes.strip_prefix(&UTF_16_BE_BOM) {
+    if let Some(data) = bytes.strip_prefix(&UTF_16_BE_BOM[..]) {
         let code_units = data.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]]));
         let str = std::char::decode_utf16(code_units)
             .collect::<Result<String, _>>()
@@ -463,7 +473,7 @@ fn format_str(f: &mut Formatter, val: &Object) -> Result<(), ()> {
 
 fn format_byte_str(f: &mut Formatter, val: &Object) -> Result<(), ()> {
     let Object::String(val) = val else { return Err(()) };
-    let bytes = val.get();
+    let bytes = val.as_bytes();
     if bytes.iter().all(
         |b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b' ' | b'-' | b'_'),
     ) {
