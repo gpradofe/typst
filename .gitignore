@@ -16,6 +16,8 @@ tarpaulin-report.html
 
 # Rust
 /target
+/target-nodhat
+/target-*
 **/*.rs.bk
 
 # Profiling output
