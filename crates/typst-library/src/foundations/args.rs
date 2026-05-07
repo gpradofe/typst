@@ -200,6 +200,42 @@ impl Args {
             }
             false
         });
+        // Free the large backing allocation now that positional items are
+        // consumed. For table() with 1M cells, this releases ~72 MB before
+        // the children EcoVec is allocated, reducing peak overlap.
+        if self.items.is_empty() {
+            self.items = EcoVec::new();
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        Ok(list)
+    }
+
+    /// Like [`all`](Self::all), but collects directly into an `EcoVec`,
+    /// avoiding the intermediate `Vec` allocation. For table() with 1M cells,
+    /// this saves ~42 MB by not doubling during `EcoVec::from(Vec)`.
+    pub fn all_eco<T>(&mut self) -> SourceResult<EcoVec<T>>
+    where
+        T: FromValue<Spanned<Value>> + Clone,
+    {
+        let mut list = EcoVec::new();
+        let mut errors = eco_vec![];
+        self.items.retain(|item| {
+            if item.name.is_some() {
+                return true;
+            }
+            let span = item.value.span;
+            let spanned = Spanned::new(std::mem::take(&mut item.value.v), span);
+            match T::from_value(spanned).at(span) {
+                Ok(val) => list.push(val),
+                Err(diags) => errors.extend(diags),
+            }
+            false
+        });
+        if self.items.is_empty() {
+            self.items = EcoVec::new();
+        }
         if !errors.is_empty() {
             return Err(errors);
         }

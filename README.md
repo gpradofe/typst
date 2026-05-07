@@ -2,23 +2,160 @@
   <img alt="Typst" src="https://user-images.githubusercontent.com/17899797/226108480-722b770e-6313-40d7-84f2-26bebb55a281.png">
 </h1>
 
+<h3 align="center">Memory-Optimized Fork &mdash; 95–97 % Less RAM for Large Tables</h3>
+
 <p align="center">
-  <a href="https://typst.app/docs/">
-    <img alt="Documentation" src="https://img.shields.io/website?down_message=offline&label=docs&up_color=007aff&up_message=online&url=https%3A%2F%2Ftypst.app%2Fdocs"
-  ></a>
-  <a href="https://typst.app/">
-    <img alt="Typst App" src="https://img.shields.io/website?down_message=offline&label=typst.app&up_color=239dad&up_message=online&url=https%3A%2F%2Ftypst.app"
-  ></a>
-  <a href="https://discord.gg/2uDybryKPe">
-    <img alt="Discord Server" src="https://img.shields.io/discord/1054443721975922748?color=5865F2&label=discord&labelColor=555"
-  ></a>
-  <a href="https://github.com/typst/typst/blob/main/LICENSE">
-    <img alt="Apache-2 License" src="https://img.shields.io/badge/license-Apache%202-brightgreen"
-  ></a>
-  <a href="https://typst.app/jobs/">
-    <img alt="Jobs at Typst" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftypst.app%2Fassets%2Fdata%2Fshields.json&query=%24.jobs.text&label=jobs&color=%23A561FF&cacheSeconds=1800"
-  ></a>
+  <a href="#benchmark-results">
+    <img alt="RAM Reduction" src="https://img.shields.io/badge/RAM_reduction-up_to_97%25-2E7D32?style=for-the-badge">
+  </a>
+  <a href="#benchmark-results">
+    <img alt="Speedup" src="https://img.shields.io/badge/speedup-up_to_5.9x-1565C0?style=for-the-badge">
+  </a>
+  <a href="BENCHMARKS.md">
+    <img alt="Benchmarks" src="https://img.shields.io/badge/full_benchmarks-view_report-E65100?style=for-the-badge">
+  </a>
 </p>
+
+---
+
+> **This is a fork of [typst/typst](https://github.com/typst/typst) v0.14.2** with targeted memory optimizations for large-document compilation. All 3,380 upstream tests pass and PDF output is visually and textually identical to the original binary. These changes are proposed for upstream integration.
+
+## The Problem
+
+When compiling documents with large tables (10K+ rows), Typst's memory usage grows disproportionately — a 100K-row table document that produces a ~200 MB PDF consumed **16 GB of RAM** with the original binary. This made Typst impractical for production PDF generation from database exports, reports, and other data-heavy workflows.
+
+This fork brings a 100K-row simple table from **16 GB → 449 MB (97 % reduction)**, and scales to **1.2 M rows at ~5–7 GB** (vs ~180 GB projected for the original). Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows — the practical floor without upstream krilla changes.
+
+## The Solution
+
+Through systematic heap profiling with [dhat](https://docs.rs/dhat/latest/dhat/) and analysis of Typst's layout pipeline, I identified several root causes of excessive memory allocation:
+
+1. **Deep cloning in `Content::set()`** — Every table cell triggered `make_unique()` deep copies when setting location metadata. Moved `Location` from `Content` to `Tag` to eliminate these clones entirely.
+
+2. **Per-cell `Packed<TableCell>` allocation** — `resolve_cell` cloned and mutated cells, triggering `RawContent::clone_impl()`. Switched to direct cell construction without clone-and-mutate.
+
+3. **Duplicate stroke computation** — Identical table strokes were recomputed per cell. Added thread-local `Arc`-based stroke deduplication cache.
+
+4. **Unbounded comemo cache growth** — The memoization cache grew without bound during grid layout. Added periodic eviction every 15 finished pages.
+
+5. **All pages held in memory during PDF export** — Added `DiskPageStore` streaming: pages are serialized to disk after runs of >100 pages, keeping only recent pages in memory.
+
+All optimizations preserve **visually and textually identical PDF output** — verified by automated comparison against the original binary (see `tests/correctness_test.py`). Byte-level differences are limited to PDF metadata and structure IDs, not rendered content.
+
+## Benchmark Results
+
+Measured **2026-04-22** on Windows 11, Intel Core i9-14900K (32 threads), 128 GB DDR5. Three table templates of increasing complexity, at 10 K / 100 K / 300 K / 600 K / 1.2 M rows. Original and optimized binaries run back-to-back on the same dataset.
+
+### At 100,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 16,086 MB | **449 MB** | **97.2 %** | 79.8 s | **19.8 s** | **4.0 ×** |
+| Single Table (Advanced)   | 15,491 MB | **563 MB** | **96.4 %** | 78.1 s | **47.1 s** | **1.7 ×** |
+| Multi-Table (Advanced)    | 14,711 MB | **687 MB** | **95.3 %** | 62.0 s | **41.5 s** | **1.5 ×** |
+
+### At 10,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 1,696 MB | **52 MB**  | **96.9 %** | 7.7 s | **1.3 s** | **5.9 ×** |
+| Single Table (Advanced)   | 1,625 MB | **101 MB** | **93.8 %** | 4.9 s | **2.9 s** | **1.7 ×** |
+| Multi-Table (Advanced)    | 1,607 MB | **175 MB** | **89.1 %** | 3.9 s | **2.8 s** | **1.4 ×** |
+
+### At 300,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 45,160 MB | **1,268 MB** | **97.2 %** | 267.3 s | **66.4 s**  | **4.0 ×** |
+| Single Table (Advanced)   | 45,469 MB | **1,608 MB** | **96.5 %** | 299.5 s | **154.1 s** | **1.9 ×** |
+| Multi-Table (Advanced)    | 41,940 MB | **1,748 MB** | **95.8 %** | 184.2 s | **133.8 s** | **1.4 ×** |
+
+### At 600,000 rows
+
+| Template | Original RAM | Optimized RAM | Reduction | Original Time | Optimized Time | Speedup |
+|----------|-------------:|--------------:|----------:|--------------:|---------------:|--------:|
+| Simple Table              | 89,969 MB | **2,741 MB** | **97.0 %** | 733.5 s  | **142.1 s** | **5.2 ×** |
+| Single Table (Advanced)   | 89,857 MB | **3,177 MB** | **96.5 %** | 1,269.1 s | **322.9 s** | **3.9 ×** |
+| Multi-Table (Advanced)    | 81,549 MB | **3,393 MB** | **95.8 %** | 419.7 s  | **277.3 s** | **1.5 ×** |
+
+At 600 K rows the original binary needs **~90 GB of RAM** (pushing a 128 GB workstation to its limit). The fork runs the same workload in **~3 GB** with 1.5–5.2 × speedup.
+
+### At 1.2 million rows (optimized only — original exceeds 128 GB)
+
+| Template | Peak RAM | Time | PDF size | RAM / PDF |
+|----------|---------:|-----:|---------:|----------:|
+| Simple                    | **5,498 MB** | 5.4 min | 2,549 MB | **2.16 ×** |
+| Single Table (Advanced)   | **6,335 MB** | 12.1 min | 3,333 MB | **1.90 ×** |
+| Multi-Table (Advanced)    | **6,804 MB** | 10.2 min | 3,309 MB | **2.06 ×** |
+
+Peak RAM is now within **~2 × the final PDF size** at 1.2 M rows for all three templates. Memory scales **~11 × from 100 K to 1.2 M** — slightly sublinear with data size. The original binary is projected to need ~180 GB for the same workload.
+
+Remaining headroom at 1.2 M is krilla-side: `pdf_writer::Buf::with_capacity` holds ~3 GB of in-memory PDF assembly. That work is scoped to the companion krilla fork and tracked upstream at [LaurenzV/krilla#353](https://github.com/LaurenzV/krilla/issues/353).
+
+<p align="center">
+  <a href="BENCHMARKS.md"><strong>View full benchmark report with all graphs and methodology &rarr;</strong></a>
+</p>
+
+## Reproducing the Benchmarks
+
+All benchmark infrastructure is included. Anyone can reproduce these results:
+
+```bash
+pip install psutil matplotlib numpy
+
+# Generate test data (100 rows to 1.2M rows)
+python benchmarks/generate_benchmark_data.py
+
+# Run benchmarks
+python benchmarks/run_benchmarks.py --quick      # Up to 100K rows
+python benchmarks/run_benchmarks.py               # Full suite
+
+# Generate graphs
+python benchmarks/plot_benchmarks.py
+```
+
+## Building from Source
+
+```bash
+git clone https://github.com/gpradofe/typst.git
+cd typst
+cargo build --release
+```
+
+The optimized binary will be at `target/release/typst` (or `typst.exe` on Windows).
+
+## Running Tests
+
+```bash
+# All 3,376 tests must pass
+cargo test --release -p typst-tests
+```
+
+## About This Work
+
+This research was conducted by **[Gustavo Prado](https://github.com/gpradofe)**, who identified the memory scaling issues in Typst while using it for production PDF generation at work. After discovering that large table documents consumed disproportionate amounts of RAM, Gustavo systematically profiled the Typst compiler using dhat heap profiling, traced the root causes through the layout and PDF export pipeline, and designed the optimization strategy.
+
+
+The goal is to contribute these optimizations upstream to the [Typst project](https://github.com/typst/typst) to benefit all users working with large documents.
+
+## Files Changed
+
+40+ files across 5 crates (`typst-library`, `typst-layout`, `typst-pdf`, `typst`, `typst-cli`). Key modifications:
+
+- **`typst-library`** — `Content`/`Tag` restructuring, direct cell construction, stroke cache, engine flags
+- **`typst-layout`** — Periodic comemo eviction, memoize gating, `DiskPageStore` streaming, page spilling
+- **`typst-pdf`** — Flat tag tree, streaming PDF conversion
+- **`typst-cli`** — Streaming PDF export for large documents
+
+For the complete list, see the [FORK_NOTES.md](FORK_NOTES.md) file.
+
+---
+
+*Below is the original Typst README.*
+
+---
+
+## What is Typst?
 
 Typst is a new markup-based typesetting system that is designed to be as powerful
 as LaTeX while being much easier to learn and use. Typst has:

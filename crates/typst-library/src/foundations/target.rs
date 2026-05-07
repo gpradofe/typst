@@ -27,6 +27,27 @@ pub trait Output: Any {
 
     /// Get the output's introspector.
     fn introspector(&self) -> &dyn Introspector;
+
+    /// Drop heavy page data to free memory, keeping only the introspector.
+    /// Used in the convergence loop where historical documents only need
+    /// their introspector for the next iteration.
+    fn drop_pages(&mut self) {}
+
+    /// Whether this document is large enough to benefit from streaming
+    /// re-layout in Phase 2. Returns true when the document exceeds
+    /// a page count threshold (default: false).
+    fn should_stream(&self) -> bool {
+        false
+    }
+
+    /// Extract the introspector as an opaque box so it can be reused by
+    /// another document (e.g., Phase 2 reuses Phase 1's converged introspector).
+    fn extract_introspector(&self) -> Option<Box<dyn std::any::Any>> {
+        None
+    }
+
+    /// Set a previously extracted introspector on this document.
+    fn set_reused_introspector(&mut self, _introspector: Box<dyn std::any::Any>) {}
 }
 
 /// A trait for accepting an arbitrary kind of output as an argument.

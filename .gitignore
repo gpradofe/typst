@@ -18,7 +18,13 @@ docs/dist
 
 # Rust
 /target
+/target-nodhat
+/target-*
 **/*.rs.bk
+
+# Profiling output
+dhat-heap*.json
+timings*.json
 
 # Node
 node_modules

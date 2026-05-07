@@ -5,7 +5,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ecow::{EcoString, eco_format};
-use hayro::{FontData, FontQuery, InterpreterSettings, StandardFont};
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::font::{FontData, FontQuery, StandardFont};
 use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 use tiny_skia as sk;
@@ -309,10 +310,19 @@ fn pdf_to_svg(bytes: &[u8]) -> String {
             FontQuery::Standard(s) => select_standard_font(*s),
             FontQuery::Fallback(f) => select_standard_font(f.pick_standard_font()),
         }),
+        cmap_resolver: Arc::new(|_| None),
         warning_sink: Arc::new(|_| {}),
+        render_annotations: false,
     };
 
-    let mut svg = hayro_svg::convert(&pdf.pages()[0], &interpreter_settings);
+    let cache = hayro_svg::RenderCache::new();
+    let render_settings = hayro_svg::SvgRenderSettings::default();
+    let mut svg = hayro_svg::convert(
+        &pdf.pages()[0],
+        &cache,
+        &interpreter_settings,
+        &render_settings,
+    );
 
     // Insert a white background, since PDFs don't set a background by default.
     let pos = svg.find(">").expect("end of opening `<svg>` tag");
@@ -334,7 +344,7 @@ fn generate_pdf(
 ) -> SourceResult<Vec<u8>> {
     let standards = PdfStandards::new(standard.as_slice()).unwrap();
     let options = PdfOptions { standards, ..Default::default() };
-    typst_pdf::pdf(doc, &options)
+    typst_pdf::pdf(doc.clone(), &options)
 }
 
 pub struct Pdftags;

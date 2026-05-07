@@ -1,0 +1,183 @@
+name: Sync with upstream typst
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Check out fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch typst/typst@main
+        run: |
+          git remote add upstream https://github.com/typst/typst.git || true
+          git fetch upstream main
+
+      - name: Determine if upstream has new commits
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+          BASE=$(git merge-base HEAD upstream/main)
+          if [ "$BASE" = "$UPSTREAM_HEAD" ]; then
+            echo "Up to date."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          {
+            echo 'new_commits<<SYNCEOF'
+            git log --oneline "$BASE..$UPSTREAM_HEAD" | head -50
+            echo 'SYNCEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attempt merge (no-ff)
+        if: steps.check.outputs.needs_sync == 'true'
+        id: merge
+        run: |
+          set +e
+          DATE=$(date -u +%Y-%m-%d)
+          git merge --no-ff upstream/main -m "Merge upstream typst/main ($DATE)"
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            {
+              echo 'conflicted_files<<SYNCEOF'
+              git diff --name-only --diff-filter=U
+              echo 'SYNCEOF'
+            } >> "$GITHUB_OUTPUT"
+            git merge --abort
+            echo "outcome=conflict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "outcome=merged" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        if: steps.merge.outputs.outcome == 'merged'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89'
+
+      - name: Cache cargo
+        if: steps.merge.outputs.outcome == 'merged'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        if: steps.merge.outputs.outcome == 'merged'
+        id: build
+        continue-on-error: true
+        run: cargo build --release
+
+      - name: Test
+        if: steps.merge.outputs.outcome == 'merged' && steps.build.outcome == 'success'
+        id: test
+        continue-on-error: true
+        run: cargo test --release -p typst-tests
+
+      - name: Tag and push on clean sync
+        if: steps.merge.outputs.outcome == 'merged' && steps.build.outcome == 'success' && steps.test.outcome == 'success'
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          git tag "sync-$DATE"
+          git push origin main
+          git push origin "sync-$DATE"
+
+      - name: Open issue on merge conflict
+        if: steps.merge.outputs.outcome == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const newCommits = `${{ steps.check.outputs.new_commits }}`;
+            const files = `${{ steps.merge.outputs.conflicted_files }}`;
+            const date = new Date().toISOString().slice(0, 10);
+            const body = [
+              "Automated sync with `typst/typst@main` hit merge conflicts.",
+              "",
+              "### Upstream commits that couldn't be merged",
+              "```",
+              newCommits || "(commit list unavailable)",
+              "```",
+              "",
+              "### Files with conflicts",
+              "```",
+              files || "(none listed)",
+              "```",
+              "",
+              "### How to resolve locally",
+              "```bash",
+              "git fetch upstream main",
+              "git merge upstream/main",
+              "# resolve conflicts, preserving the optimizations in FORK_NOTES.md",
+              "cargo test --release -p typst-tests",
+              "git push origin main",
+              "git tag sync-" + date + " && git push origin sync-" + date,
+              "```",
+              "",
+              "_Opened automatically by `.github/workflows/sync-upstream.yml`._"
+            ].join("\n");
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `Upstream sync conflict (${date})`,
+              body,
+              labels: ["upstream-sync", "conflict"]
+            });
+
+      - name: Open issue on build/test failure
+        if: >
+          steps.merge.outputs.outcome == 'merged' &&
+          (steps.build.outcome == 'failure' || steps.test.outcome == 'failure')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const newCommits = `${{ steps.check.outputs.new_commits }}`;
+            const buildOutcome = `${{ steps.build.outcome }}`;
+            const testOutcome  = `${{ steps.test.outcome }}`;
+            const date = new Date().toISOString().slice(0, 10);
+            const body = [
+              "Upstream sync merged cleanly but **build: " + buildOutcome + ", test: " + testOutcome + "**.",
+              "",
+              "### Upstream commits merged",
+              "```",
+              newCommits || "(commit list unavailable)",
+              "```",
+              "",
+              "### How to reproduce locally",
+              "```bash",
+              "git fetch upstream main",
+              "git merge upstream/main",
+              "cargo build --release",
+              "cargo test --release -p typst-tests",
+              "```",
+              "",
+              "Fix the break, re-run tests, then push to `main` and tag `sync-" + date + "`.",
+              "",
+              "_Opened automatically by `.github/workflows/sync-upstream.yml`._"
+            ].join("\n");
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `Upstream sync broke build/tests (${date})`,
+              body,
+              labels: ["upstream-sync", "tests-failed"]
+            });

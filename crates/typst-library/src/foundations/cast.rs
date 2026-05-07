@@ -7,7 +7,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::ops::Add;
 
-use ecow::eco_format;
+use ecow::{EcoVec, eco_format};
 use smallvec::SmallVec;
 use typst_syntax::{Span, Spanned, SyntaxMode};
 use unicode_math_class::MathClass;
@@ -431,6 +431,10 @@ impl<T> Container for Vec<T> {
 }
 
 impl<T, const N: usize> Container for SmallVec<[T; N]> {
+    type Inner = T;
+}
+
+impl<T: Clone> Container for EcoVec<T> {
     type Inner = T;
 }
 

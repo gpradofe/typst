@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 
 use ecow::EcoVec;
-use krilla::tagging::{self as kt, Node, Tag, TagKind};
+use krilla::tagging::{self as kt, Node, PdfRef, Tag, TagKind, TagSerializer};
 use krilla::tagging::{Identifier, TagTree};
 use smallvec::SmallVec;
 use typst_library::diag::{At, SourceDiagnostic, SourceResult, error};
@@ -11,10 +11,11 @@ use typst_syntax::Span;
 use crate::PdfOptions;
 use crate::convert::{GlobalContext, to_span};
 use crate::tags::context::{self, Annotations, BBoxCtx, Ctx};
-use crate::tags::groups::{Group, GroupId, GroupKind, TagStorage};
+use crate::tags::flat::{FlatTagData, ResolvedGroupKind};
+use crate::tags::groups::{GroupId, GroupKind, TagStorage};
 use crate::tags::resolve::accumulator::Accumulator;
 use crate::tags::tree::ResolvedTextAttrs;
-use crate::tags::util::{self, IdVec, PropertyOptRef, PropertyValCopied};
+use crate::tags::util;
 use crate::tags::{AnnotationId, disabled};
 
 mod accumulator;
@@ -28,13 +29,17 @@ pub enum TagNode {
     Annotation(AnnotationId),
     /// If the attributes are non-empty this will resolve to a [`Tag::Span`],
     /// otherwise the items are inserted directly.
-    Text(ResolvedTextAttrs, Vec<Identifier>),
+    /// Boxed to keep the TagNode enum small (16 bytes instead of 64).
+    Text(Box<(ResolvedTextAttrs, Vec<Identifier>)>),
 }
 
 struct Resolver<'a> {
     options: &'a PdfOptions<'a>,
     ctx: &'a Ctx,
-    groups: &'a IdVec<Group>,
+    flat: &'a FlatTagData,
+    /// Children arrays, split out of FlatTagData so we can take/free them
+    /// incrementally during resolve while borrowing `flat` immutably.
+    children: &'a mut Vec<SmallVec<[TagNode; 1]>>,
     tags: &'a mut TagStorage,
     annotations: &'a mut Annotations,
     last_heading_level: Option<NonZeroU16>,
@@ -52,13 +57,34 @@ impl<'a> Resolver<'a> {
     }
 }
 
-pub fn resolve(gc: &mut GlobalContext) -> SourceResult<(Option<Locale>, TagTree)> {
+pub fn resolve(
+    gc: &mut GlobalContext,
+    document: &mut krilla::Document,
+) -> SourceResult<(Option<Locale>, TagTree)> {
     gc.tags.tree.assert_finished_traversal().at(Span::detached())?;
 
     if !disabled(gc) {
         context::finish(&mut gc.tags.tree);
+
+        // After context::finish, TableCtx cells (~72 MB) and StrokeGrid (~64 MB)
+        // have been freed. Shrink Groups.list to reclaim Vec doubling waste
+        // (~61 MB for 1M-cell tables: 2M capacity shrunk to 1M actual entries).
+        // This must happen AFTER finish (which adds row/body groups) but BEFORE
+        // flatten (which drains the list into compact parallel arrays).
+        gc.tags.tree.groups.list.shrink_to_fit();
+        gc.tags.tree.groups.tags.shrink_to_fit();
+        // Adaptive trim: full WS trim only for large documents (>= 200K
+        // cumulative grid entries) where the saved ~500 MB of RSS prevents
+        // swap during tag flattening. For smaller documents, the cheaper
+        // HeapCompact suffices and saves ~500ms of page-fault cost.
+        if typst_library::engine_flags::cumulative_grid_entries() >= 200_000 {
+            typst_library::engine_flags::compact_heap_and_trim_ws_full();
+        } else {
+            typst_library::engine_flags::compact_heap_and_trim_ws();
+        }
     }
 
+    // Extract doc_lang from root BEFORE flattening (flatten drains the list).
     let root = gc.tags.tree.groups.list.get(GroupId::ROOT);
     let GroupKind::Root(mut doc_lang) = root.kind else { unreachable!() };
 
@@ -66,44 +92,88 @@ pub fn resolve(gc: &mut GlobalContext) -> SourceResult<(Option<Locale>, TagTree)
         return Ok((doc_lang, TagTree::new()));
     }
 
+    // Flatten the Groups tree into a compact FlatTagTree representation.
+    // This drains all Group data into parallel arrays, drops the HashMap,
+    // and moves TagStorage out. The original Groups struct is now empty.
+    let mut flat = gc.tags.tree.groups.flatten();
+
+    // Split children out of FlatTagData so we can take (consume) them
+    // incrementally during resolve, freeing memory as each group is processed.
+    let mut children = std::mem::take(&mut flat.data.children);
+
+    // Streaming serialization is only possible when the document has no
+    // annotation identifiers. Annotations require page info (annotation refs)
+    // that isn't available until after page serialization in Document::finish().
+    // For documents without annotations (the common case for large tables),
+    // streaming serialization reduces peak memory from ~440 MB to ~10 MB.
+    let use_streaming = gc.tags.annotations.is_empty();
+
     let mut resolver = Resolver {
         options: gc.options,
         ctx: &gc.tags.tree.ctx,
-        groups: &gc.tags.tree.groups.list,
-        tags: &mut gc.tags.tree.groups.tags,
+        flat: &flat.data,
+        children: &mut children,
+        tags: &mut flat.tag_storage,
         annotations: &mut gc.tags.annotations,
         last_heading_level: None,
         flatten: false,
         errors: std::mem::take(&mut gc.tags.tree.errors),
     };
 
-    let mut accum = Accumulator::root();
-    accum.reserve(root.nodes().len());
+    // Create a streaming tag serializer. Even in non-streaming mode, we need
+    // one because resolve_node/resolve_group_node take it as a parameter.
+    // In non-streaming mode, parent_ref is None so serialize_group is never called.
+    let mut serializer = document.tag_serializer();
+    let parent_ref_for_root =
+        if use_streaming { Some(serializer.document_ref()) } else { None };
 
-    for child in root.nodes().iter() {
-        resolve_node(&mut resolver, &mut doc_lang, &mut None, &mut accum, child);
+    let root_children = std::mem::take(&mut resolver.children[GroupId::ROOT.idx()]);
+    let mut accum = Accumulator::root();
+    accum.reserve(root_children.len());
+
+    for child in root_children.iter() {
+        resolve_node(
+            &mut resolver,
+            &mut serializer,
+            &mut doc_lang,
+            &mut None,
+            &mut accum,
+            child,
+            parent_ref_for_root,
+        );
     }
+    drop(root_children);
 
     if !resolver.errors.is_empty() {
         return Err(resolver.errors);
     }
 
-    let children = accum.finish();
+    drop(resolver);
+    drop(children);
+    drop(flat);
 
-    Ok((doc_lang, TagTree::from(children)))
+    if use_streaming {
+        // Store pre-serialized data back into the document's SerializeContext.
+        serializer.finish_into();
+    }
+
+    let result_children = accum.finish();
+    Ok((doc_lang, TagTree::from(result_children)))
 }
 
 /// Resolves nodes into an accumulator.
 fn resolve_node(
     rs: &mut Resolver,
+    ts: &mut TagSerializer,
     parent_lang: &mut Option<Locale>,
     parent_bbox: &mut Option<BBoxCtx>,
     accum: &mut Accumulator,
     node: &TagNode,
+    parent_ref: Option<PdfRef>,
 ) {
     match &node {
         TagNode::Group(id) => {
-            resolve_group_node(rs, parent_lang, parent_bbox, accum, *id);
+            resolve_group_node(rs, ts, parent_lang, parent_bbox, accum, *id, parent_ref);
         }
         TagNode::Leaf(identifier) => {
             accum.push(Node::Leaf(*identifier));
@@ -111,24 +181,53 @@ fn resolve_node(
         TagNode::Annotation(id) => {
             accum.push(rs.annotations.take(*id));
         }
-        TagNode::Text(attrs, ids) => {
-            resolve_text(accum, attrs, ids);
+        TagNode::Text(boxed) => {
+            resolve_text(ts, accum, &boxed.0, &boxed.1, parent_ref);
         }
     }
 }
 
 fn resolve_group_node(
     rs: &mut Resolver,
+    ts: &mut TagSerializer,
     parent_lang: &mut Option<Locale>,
     mut parent_bbox: &mut Option<BBoxCtx>,
     mut accum: &mut Accumulator,
     id: GroupId,
+    parent_ref: Option<PdfRef>,
 ) {
-    let group = rs.groups.get(id);
+    let idx = id.idx();
 
-    let tag = build_group_tag(rs, group);
-    let mut lang = group.kind.lang().filter(|_| tag.is_some());
-    let mut bbox = rs.ctx.bbox(&group.kind).cloned();
+    let tag = build_group_tag(rs, idx);
+    let kind = rs.flat.kind(idx);
+    let mut lang = rs.flat.lang(idx).filter(|_| tag.is_some());
+    let mut bbox = rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
+    let is_artifact = kind.is_artifact();
+    let is_weak = rs.flat.is_weak(idx);
+
+    // Allocate a PDF Ref for this group if it produces a tag.
+    // This must happen BEFORE processing children so children can
+    // reference this group as their parent. We always allocate even when
+    // pre-serialization isn't possible (annotation descendants), because
+    // children may be pre-serialized with this ref as their parent.
+    let my_ref = if tag.is_some() && parent_ref.is_some() {
+        Some(ts.new_ref())
+    } else if tag.is_some() {
+        // No parent ref (shouldn't happen with document_ref), but just in case
+        None
+    } else {
+        // Tagless groups pass through the parent ref.
+        parent_ref
+    };
+
+    // Take children for single-parent groups to free memory incrementally.
+    // Clone for multi-parent groups (LogicalChild, Artifact, etc.) since they
+    // may be referenced from multiple parents.
+    let group_children = if kind.is_single_parent() {
+        std::mem::take(&mut rs.children[idx])
+    } else {
+        rs.children[idx].clone()
+    };
 
     // If this group doesn't produce a tag, don't create a nested accumulator
     // and push the children directly into the parent.
@@ -145,20 +244,21 @@ fn resolve_group_node(
     // won't be ingested by AT anyway, but would still have to comply with all
     // rules, which can be annoying.
     let flatten = tag.as_ref().is_some_and(|t| t.alt_text().is_some());
+
     rs.with_flatten(flatten, |rs| {
         let lang = lang.as_mut().unwrap_or(parent_lang);
         let bbox = if bbox.is_some() { &mut bbox } else { &mut parent_bbox };
 
         // In PDF 1.7, don't include artifacts in the tag tree. In PDF 2.0
         // this might become an `Artifact` tag.
-        if group.kind.is_artifact() {
-            for child in group.nodes().iter() {
+        if is_artifact {
+            for child in group_children.iter() {
                 resolve_artifact_node(rs, bbox, child);
             }
         } else {
-            children.reserve(group.nodes().len());
-            for child in group.nodes().iter() {
-                resolve_node(rs, lang, bbox, children, child);
+            children.reserve(group_children.len());
+            for child in group_children.iter() {
+                resolve_node(rs, ts, lang, bbox, children, child, my_ref);
             }
         }
     });
@@ -177,7 +277,7 @@ fn resolve_group_node(
 
     // Omit the weak group if it is empty.
     let nodes = nested_children.finish();
-    if group.weak && nodes.is_empty() {
+    if is_weak && nodes.is_empty() {
         return;
     }
 
@@ -195,13 +295,40 @@ fn resolve_group_node(
         validate_children(rs, &tag, &nodes);
     }
 
-    accum.push(Node::Group(kt::TagGroup::with_children(tag, nodes)));
+    // Pre-serialize the group if we have a parent ref AND none of the
+    // resolved children are Node::Group or Node::PreAllocGroup. Those
+    // children would be recursively serialized by serialize_group, which
+    // fails for annotation identifiers (annotation refs aren't available
+    // until after page serialization).
+    let has_unserializable_children = nodes
+        .iter()
+        .any(|n| matches!(n, Node::Group(_) | Node::PreAllocGroup(_, _)));
+
+    if let Some(p_ref) = parent_ref {
+        let group = kt::TagGroup::with_children(tag, nodes);
+        let elem_ref = my_ref.unwrap();
+        if !has_unserializable_children {
+            // All children are Node::Ref or Node::Leaf — safe to pre-serialize.
+            let _ = ts.serialize_group(group, elem_ref, p_ref);
+            accum.push(Node::Ref(elem_ref));
+        } else {
+            // Some children are Node::Group (contain annotations).
+            // Use PreAllocGroup so serialize_consuming uses our pre-allocated
+            // ref (children already reference it as their parent).
+            accum.push(Node::PreAllocGroup(elem_ref, group));
+        }
+    } else {
+        let group = kt::TagGroup::with_children(tag, nodes);
+        accum.push(Node::Group(group));
+    }
 }
 
 fn resolve_text(
+    ts: &mut TagSerializer,
     accum: &mut Accumulator,
     attrs: &ResolvedTextAttrs,
     children: &[kt::Identifier],
+    parent_ref: Option<PdfRef>,
 ) {
     enum Prev<'a> {
         Children(&'a [kt::Identifier]),
@@ -240,7 +367,16 @@ fn resolve_text(
     }
 
     match prev {
-        Prev::Group(group) => accum.push(Node::Group(group)),
+        Prev::Group(group) => {
+            // Serialize text groups via TagSerializer if we have a parent ref.
+            if let Some(p_ref) = parent_ref {
+                let elem_ref = ts.new_ref();
+                let _ = ts.serialize_group(group, elem_ref, p_ref);
+                accum.push(Node::Ref(elem_ref));
+            } else {
+                accum.push(Node::Group(group));
+            }
+        }
         Prev::Children(ids) => accum.extend(ids.iter().map(|id| Node::Leaf(*id))),
     }
 }
@@ -253,12 +389,16 @@ fn resolve_artifact_node(
 ) {
     match &node {
         TagNode::Group(id) => {
-            let group = rs.groups.get(*id);
-            let mut bbox = rs.ctx.bbox(&group.kind).cloned();
+            let idx = id.idx();
+            let mut bbox =
+                rs.flat.bbox(idx).and_then(|id| rs.ctx.bbox_by_id(id)).cloned();
+            // Always clone in artifact context — the same group may appear
+            // in a non-artifact parent that still needs its children.
+            let group_children = rs.children[idx].clone();
 
             {
                 let bbox = if bbox.is_some() { &mut bbox } else { &mut parent_bbox };
-                for child in group.nodes().iter() {
+                for child in group_children.iter() {
                     resolve_artifact_node(rs, bbox, child);
                 }
             }
@@ -274,50 +414,89 @@ fn resolve_artifact_node(
     }
 }
 
-fn build_group_tag(rs: &mut Resolver, group: &Group) -> Option<TagKind> {
-    let tag = match &group.kind {
-        GroupKind::Root(_) => unreachable!(),
-        GroupKind::Artifact(_) => return None,
-        GroupKind::LogicalParent(_) => return None,
-        GroupKind::LogicalChild(_, _) => return None,
-        GroupKind::Outline(_, _) => Tag::TOC.into(),
-        GroupKind::OutlineEntry(_, _) => Tag::TOCI.into(),
-        GroupKind::Table(id, _, _) => rs.ctx.tables.get(*id).build_tag(),
-        GroupKind::TableCell(_, tag, _) => rs.tags.take(*tag),
-        GroupKind::Grid(_, _) => Tag::Div.into(),
-        GroupKind::GridCell(_, _) => Tag::Div.into(),
-        GroupKind::List(_, numbering, _) => Tag::L(*numbering).into(),
-        GroupKind::ListItemLabel(_) => Tag::Lbl.into(),
-        GroupKind::ListItemBody(_) => Tag::LBody.into(),
-        GroupKind::TermsItemLabel(_) => Tag::Lbl.into(),
-        GroupKind::TermsItemBody(_, _) => Tag::LBody.into(),
-        GroupKind::BibEntry(_) => Tag::BibEntry.into(),
-        GroupKind::FigureWrapper(id) => rs.ctx.figures.get(*id).build_wrapper_tag()?,
-        GroupKind::Figure(id, _, _) => rs.ctx.figures.get(*id).build_tag()?,
-        GroupKind::FigureCaption(_, _) => Tag::Caption.into(),
-        GroupKind::Image(image, _, _) => {
-            let alt = image.alt.opt_ref().map(Into::into);
-            Tag::Figure(alt).with_placement(Some(kt::Placement::Block)).into()
+fn build_group_tag(rs: &mut Resolver, idx: usize) -> Option<TagKind> {
+    // First pass: extract what we need from the kind without holding a
+    // long-lived immutable borrow on rs.flat, so we can call
+    // tag_storage.take() (mutable) when needed.
+    enum TagSource {
+        /// Tag was built directly from kind data.
+        Direct(TagKind),
+        /// Need to take from tag_storage by TagId.
+        TakeFromStorage(crate::tags::context::TagId),
+        /// No tag for this group kind.
+        None,
+        /// Unreachable (Root).
+        Unreachable,
+    }
+
+    let kind = rs.flat.kind(idx);
+    let is_link = kind.is_link();
+    let source = match kind {
+        ResolvedGroupKind::Root => TagSource::Unreachable,
+        ResolvedGroupKind::Artifact(_) => TagSource::None,
+        ResolvedGroupKind::LogicalParent => TagSource::None,
+        ResolvedGroupKind::LogicalChild => TagSource::None,
+        ResolvedGroupKind::Outline => TagSource::Direct(Tag::TOC.into()),
+        ResolvedGroupKind::OutlineEntry => TagSource::Direct(Tag::TOCI.into()),
+        ResolvedGroupKind::Table(id) => {
+            TagSource::Direct(rs.ctx.tables.get(*id).build_tag())
         }
-        GroupKind::Formula(equation, _, _) => {
-            let alt = equation.alt.opt_ref().map(Into::into);
-            let placement = equation.block.val().then_some(kt::Placement::Block);
-            Tag::Formula(alt).with_placement(placement).into()
+        ResolvedGroupKind::TableCell(tag_id) => TagSource::TakeFromStorage(*tag_id),
+        ResolvedGroupKind::Grid => TagSource::Direct(Tag::Div.into()),
+        ResolvedGroupKind::GridCell => TagSource::Direct(Tag::Div.into()),
+        ResolvedGroupKind::List(numbering) => {
+            TagSource::Direct(Tag::L(*numbering).into())
         }
-        GroupKind::Link(_, _) => Tag::Link.into(),
-        GroupKind::CodeBlock(_) => {
-            Tag::Code.with_placement(Some(kt::Placement::Block)).into()
+        ResolvedGroupKind::ListItemLabel => TagSource::Direct(Tag::Lbl.into()),
+        ResolvedGroupKind::ListItemBody => TagSource::Direct(Tag::LBody.into()),
+        ResolvedGroupKind::TermsItemLabel => TagSource::Direct(Tag::Lbl.into()),
+        ResolvedGroupKind::TermsItemBody => TagSource::Direct(Tag::LBody.into()),
+        ResolvedGroupKind::BibEntry => TagSource::Direct(Tag::BibEntry.into()),
+        ResolvedGroupKind::FigureWrapper(id) => {
+            match rs.ctx.figures.get(*id).build_wrapper_tag() {
+                Some(tag) => TagSource::Direct(tag),
+                None => return None,
+            }
         }
-        GroupKind::CodeBlockLine(_) => Tag::P.into(),
-        GroupKind::Par(_) => Tag::P.into(),
-        GroupKind::TextAttr(_) => return None,
-        GroupKind::Transparent => return None,
-        GroupKind::Standard(tag, _) => rs.tags.take(*tag),
+        ResolvedGroupKind::Figure(id) => match rs.ctx.figures.get(*id).build_tag() {
+            Some(tag) => TagSource::Direct(tag),
+            None => return None,
+        },
+        ResolvedGroupKind::FigureCaption => TagSource::Direct(Tag::Caption.into()),
+        ResolvedGroupKind::Image { alt } => {
+            let alt = alt.as_ref().map(Into::into);
+            TagSource::Direct(
+                Tag::Figure(alt).with_placement(Some(kt::Placement::Block)).into(),
+            )
+        }
+        ResolvedGroupKind::Formula { alt, block } => {
+            let alt = alt.as_ref().map(Into::into);
+            let placement = block.then_some(kt::Placement::Block);
+            TagSource::Direct(Tag::Formula(alt).with_placement(placement).into())
+        }
+        ResolvedGroupKind::Link => TagSource::Direct(Tag::Link.into()),
+        ResolvedGroupKind::CodeBlock => {
+            TagSource::Direct(Tag::Code.with_placement(Some(kt::Placement::Block)).into())
+        }
+        ResolvedGroupKind::CodeBlockLine => TagSource::Direct(Tag::P.into()),
+        ResolvedGroupKind::Par => TagSource::Direct(Tag::P.into()),
+        ResolvedGroupKind::TextAttr => TagSource::None,
+        ResolvedGroupKind::Transparent => TagSource::None,
+        ResolvedGroupKind::Standard(tag_id) => TagSource::TakeFromStorage(*tag_id),
+    };
+    // Now the immutable borrow of `kind` is dropped.
+
+    let tag = match source {
+        TagSource::Direct(tag) => tag,
+        TagSource::TakeFromStorage(tag_id) => rs.tags.take(tag_id),
+        TagSource::None => return None,
+        TagSource::Unreachable => unreachable!(),
     };
 
-    let tag = tag.with_location(Some(group.span.into_raw()));
+    let span = rs.flat.span(idx);
+    let tag = tag.with_location(Some(span.into_raw()));
 
-    if rs.flatten && !group.kind.is_link() {
+    if rs.flatten && !is_link {
         return None;
     }
 
@@ -458,24 +637,30 @@ fn validate_children_groups(
     let mut caption_spans = SmallVec::<[_; 3]>::new();
     let mut contains_leaf_nodes = false;
     for node in children {
-        let Node::Group(child) = node else {
-            contains_leaf_nodes = true;
-            continue;
-        };
-
-        if !is_valid(&child.tag) {
-            let validator = rs.options.standards.config.validator().as_str();
-            let span = to_span(child.tag.location()).or(parent_span);
-            let parent = tag_name(parent);
-            let child = tag_name(&child.tag);
-            rs.errors.push(error!(
-                span,
-                "{validator} error: invalid {parent} structure";
-                hint: "{parent} may not contain {child}";
-                hint: "this is probably caused by a show rule";
-            ));
-        } else if matches!(&child.tag, TagKind::Caption(_)) {
-            caption_spans.push(to_span(child.tag.location()));
+        match node {
+            Node::Group(child) | Node::PreAllocGroup(_, child) => {
+                if !is_valid(&child.tag) {
+                    let validator = rs.options.standards.config.validator().as_str();
+                    let span = to_span(child.tag.location()).or(parent_span);
+                    let parent = tag_name(parent);
+                    let child = tag_name(&child.tag);
+                    rs.errors.push(error!(
+                        span,
+                        "{validator} error: invalid {parent} structure";
+                        hint: "{parent} may not contain {child}";
+                        hint: "this is probably caused by a show rule";
+                    ));
+                } else if matches!(&child.tag, TagKind::Caption(_)) {
+                    caption_spans.push(to_span(child.tag.location()));
+                }
+            }
+            Node::Ref(_) => {
+                // Pre-serialized groups — already validated when they were
+                // serialized. Skip structural validation here.
+            }
+            Node::Leaf(_) => {
+                contains_leaf_nodes = true;
+            }
         }
     }
 

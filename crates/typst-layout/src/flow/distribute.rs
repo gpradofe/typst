@@ -351,6 +351,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             return Err(Stop::Finish(false));
         }
 
+        // Table fully fits on one page — clear CachedCell to free frame
+        // memory. For non-comemo-cached tables (over budget), this frees
+        // the ShapedText data. For cached tables, this is a no-op (Arc
+        // refcount decrement, data still alive in comemo).
+        multi.clear_cache();
+
         Ok(())
     }
 

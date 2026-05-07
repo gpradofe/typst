@@ -58,12 +58,15 @@ fn traverse(
             // When visiting a start tag, we check whether the element needs an
             // ID and if so, add it to the queue, so that its first child node
             // receives an ID.
-            HtmlNode::Tag(Tag::Start(elem, _)) => {
-                let loc = elem.location().unwrap();
+            HtmlNode::Tag(Tag::Start(elem, loc, _)) => {
+                let loc = *loc;
                 if targets.contains(&loc) {
                     work.enqueue(loc, elem.label());
                 }
             }
+
+            // CellStart tags have no Content/label, skip them in HTML.
+            HtmlNode::Tag(Tag::CellStart(..)) => {}
 
             // When we reach an end tag, we check whether it closes an element
             // that is still in our queue. If so, that means the element
@@ -126,8 +129,8 @@ fn traverse_frame(
 ) {
     for (_, item) in frame.items() {
         match item {
-            FrameItem::Tag(Tag::Start(elem, _)) => {
-                let loc = elem.location().unwrap();
+            FrameItem::Tag(Tag::Start(elem, loc, _)) => {
+                let loc = *loc;
                 if targets.contains(&loc)
                     && let Some(DocumentPosition::Html(position)) =
                         generator.introspector().position(loc)
@@ -138,6 +141,8 @@ fn traverse_frame(
                     anchors.push((*point, id));
                 }
             }
+            // CellStart tags have no Content/label, skip them.
+            FrameItem::Tag(Tag::CellStart(..)) => {}
             FrameItem::Group(group) => {
                 traverse_frame(work, targets, generator, &group.frame, anchors);
             }

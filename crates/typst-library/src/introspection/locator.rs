@@ -160,6 +160,21 @@ pub struct Locator<'a> {
 }
 
 impl<'a> Locator<'a> {
+    /// Reconstruct a Locator from its constituent parts.
+    pub fn from_parts(local: u128, outer: Option<&'a LocatorLink<'a>>) -> Self {
+        Self { local, outer }
+    }
+
+    /// The local hash of this locator.
+    pub fn local(&self) -> u128 {
+        self.local
+    }
+
+    /// The outer link of this locator.
+    pub fn outer(&self) -> Option<&'a LocatorLink<'a>> {
+        self.outer
+    }
+
     /// Create a new root-level locator.
     ///
     /// Should typically only be created at the document level, though there
