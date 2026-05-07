@@ -103,7 +103,7 @@ fn walk_html(
     for node in &elem.children {
         match node {
             HtmlNode::Tag(tag) => {
-                if let Tag::Start(it, _) = tag
+                if let Tag::Start(it, _, _) = tag
                     && it.label() == Some(indexer.item_label)
                     && let Some(metadata) = it.to_packed::<MetadataElem>()
                 {
