@@ -465,7 +465,7 @@ fn format_str(f: &mut Formatter, val: &Object) -> Result<(), ()> {
             .unwrap();
         write!(f, "{str:?}").ok();
     } else {
-        let str = std::str::from_utf8(&bytes).unwrap();
+        let str = std::str::from_utf8(bytes).unwrap();
         write!(f, "{str:?}").ok();
     }
     Ok(())
@@ -477,7 +477,7 @@ fn format_byte_str(f: &mut Formatter, val: &Object) -> Result<(), ()> {
     if bytes.iter().all(
         |b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b' ' | b'-' | b'_'),
     ) {
-        let str = std::str::from_utf8(&bytes).unwrap();
+        let str = std::str::from_utf8(bytes).unwrap();
         write!(f, "{str:?}").ok();
     } else {
         write!(f, "0x").ok();
