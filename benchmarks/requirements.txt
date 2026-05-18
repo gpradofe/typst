@@ -1,0 +1,4 @@
+psutil>=5.9
+# Optional, only needed for plot_benchmarks.py:
+# matplotlib>=3.7
+# numpy>=1.24

@@ -38,41 +38,39 @@ except ImportError:
 # ── Paths ──────────────────────────────────────────────────────────────────
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-# benchmarks/ lives inside typst-source/, so the typst-source fork is the
-# parent of BASE and the research root (which contains typst-bin and the
-# tests/ directory with templates + data files) is the grandparent.
-# Env overrides (TYPST_BIN / TYPST_OPT / TYPST_DATA_DIR) are honored.
+# benchmarks/ lives inside the typst fork. Everything is self-contained
+# under BASE: templates/, data/, and a per-OS optimized binary in
+# ../target/release/. Env overrides (TYPST_BIN / TYPST_OPT / TYPST_DATA_DIR)
+# are still honored for power users.
 TYPST_SOURCE = os.path.dirname(BASE)
-RESEARCH_ROOT = os.path.dirname(TYPST_SOURCE)
-DATA_DIR = os.environ.get(
-    "TYPST_DATA_DIR",
-    os.path.join(RESEARCH_ROOT, "tests"),
-)
+TEMPLATE_DIR = os.path.join(BASE, "templates")
+DATA_DIR = os.environ.get("TYPST_DATA_DIR", os.path.join(BASE, "data"))
 
+EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 ORIGINAL = os.environ.get(
     "TYPST_BIN",
-    os.path.join(RESEARCH_ROOT, "typst-bin", "typst-x86_64-pc-windows-msvc", "typst.exe"),
+    os.path.join(BASE, "bin", "original", f"typst{EXE_SUFFIX}"),
 )
 OPTIMIZED = os.environ.get(
     "TYPST_OPT",
-    os.path.join(TYPST_SOURCE, "target", "release", "typst.exe"),
+    os.path.join(TYPST_SOURCE, "target", "release", f"typst{EXE_SUFFIX}"),
 )
 
 # ── Templates ──────────────────────────────────────────────────────────────
 
 TEMPLATES = {
     "simple": {
-        "file": os.path.join(DATA_DIR,"table_test.typ"),
+        "file": os.path.join(TEMPLATE_DIR, "table_test.typ"),
         "data_format": "simple",
         "description": "Plain 10-column table, no styling",
     },
     "single-table-advanced": {
-        "file": os.path.join(DATA_DIR,"single_table_advanced_test.typ"),
+        "file": os.path.join(TEMPLATE_DIR, "single_table_advanced_test.typ"),
         "data_format": "advanced",
         "description": "Single giant table with group headers, styling, page headers/footers",
     },
     "multi-table": {
-        "file": os.path.join(DATA_DIR,"advanced_table_test.typ"),
+        "file": os.path.join(TEMPLATE_DIR, "advanced_table_test.typ"),
         "data_format": "advanced",
         "description": "Multiple tables (one per group), headers/footers, alternating fills",
     },
@@ -125,10 +123,12 @@ def monitor_memory(proc, result, interval=0.02):
     result["samples"] = samples
 
 
-def run_test(typst_exe, typ_file, datafile, output_pdf, timeout=600, cwd=None):
+def run_test(typst_exe, typ_file, datafile, output_pdf, timeout=600, cwd=None, root=None):
     """Run a single typst compile and return metrics."""
-    cmd = [typst_exe, "compile", typ_file, output_pdf,
-           "--input", f"datafile={datafile}"]
+    cmd = [typst_exe, "compile"]
+    if root:
+        cmd.extend(["--root", root])
+    cmd.extend([typ_file, output_pdf, "--input", f"datafile={datafile}"])
     result = {"peak_rss": 0, "samples": 0}
     start = time.time()
     try:
@@ -175,6 +175,90 @@ def run_test(typst_exe, typ_file, datafile, output_pdf, timeout=600, cwd=None):
                 pass
 
 
+# ── Environment preparation ───────────────────────────────────────────────
+
+ORIG_DOWNLOAD_URLS = {
+    ("win32",   "AMD64"):   "https://github.com/typst/typst/releases/download/v0.14.2/typst-x86_64-pc-windows-msvc.zip",
+    ("linux",   "x86_64"):  "https://github.com/typst/typst/releases/download/v0.14.2/typst-x86_64-unknown-linux-musl.tar.xz",
+    ("linux",   "aarch64"): "https://github.com/typst/typst/releases/download/v0.14.2/typst-aarch64-unknown-linux-musl.tar.xz",
+    ("darwin",  "x86_64"):  "https://github.com/typst/typst/releases/download/v0.14.2/typst-x86_64-apple-darwin.tar.xz",
+    ("darwin",  "arm64"):   "https://github.com/typst/typst/releases/download/v0.14.2/typst-aarch64-apple-darwin.tar.xz",
+}
+
+
+def build_optimized(skip_build=False):
+    """Build the optimized binary via cargo if it doesn't exist."""
+    if os.path.exists(OPTIMIZED):
+        return True
+    if skip_build:
+        return False
+    print(f"Optimized binary not found at {OPTIMIZED}; building with cargo...")
+    try:
+        subprocess.run(
+            ["cargo", "build", "--release"],
+            cwd=TYPST_SOURCE,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  cargo build failed: {e}")
+        return False
+    return os.path.exists(OPTIMIZED)
+
+
+def download_original(skip_download=False):
+    """Download typst 0.14.2 release binary to benchmarks/bin/original/."""
+    if os.path.exists(ORIGINAL):
+        return True
+    if skip_download:
+        return False
+    key = (sys.platform, platform.machine())
+    url = ORIG_DOWNLOAD_URLS.get(key)
+    if not url:
+        print(f"  No release binary mapping for {key}. Set TYPST_BIN to a typst 0.14.2 path.")
+        return False
+    print(f"Downloading typst 0.14.2 from {url}...")
+    import urllib.request, tempfile, tarfile, zipfile
+    bin_dir = os.path.dirname(ORIGINAL)
+    os.makedirs(bin_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = os.path.join(tmp, os.path.basename(url))
+        urllib.request.urlretrieve(url, archive)
+        if archive.endswith(".zip"):
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(tmp)
+        else:
+            with tarfile.open(archive) as t:
+                t.extractall(tmp)
+        # Find the typst binary inside the extracted tree and move it.
+        target_name = os.path.basename(ORIGINAL)
+        for root, _, files in os.walk(tmp):
+            if target_name in files:
+                src = os.path.join(root, target_name)
+                os.replace(src, ORIGINAL)
+                if sys.platform != "win32":
+                    os.chmod(ORIGINAL, 0o755)
+                return True
+    print(f"  Could not find {target_name} in the downloaded archive.")
+    return False
+
+
+def ensure_data(sizes):
+    """Generate any missing JSON data files for the requested sizes."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    missing = []
+    for s in sizes:
+        label = f"{s // 1000}k" if s >= 1000 else str(s)
+        for fname in (f"data_{label}.json", f"data_advanced_{label}.json"):
+            if not os.path.exists(os.path.join(DATA_DIR, fname)):
+                missing.append(s)
+                break
+    if not missing:
+        return
+    print(f"Generating missing data files for sizes: {missing}")
+    import generate_benchmark_data
+    generate_benchmark_data.generate_all(DATA_DIR, missing)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -187,6 +271,9 @@ def main():
     parser.add_argument("--output", default=os.path.join(BASE, "benchmark_results.json"),
                         help="Output JSON file")
     parser.add_argument("--runs", type=int, default=1, help="Number of runs per config (for averaging)")
+    parser.add_argument("--no-build", action="store_true", help="Skip cargo build of optimized binary")
+    parser.add_argument("--no-download", action="store_true", help="Skip downloading the original 0.14.2 binary")
+    parser.add_argument("--no-generate", action="store_true", help="Skip generating missing data files")
     args = parser.parse_args()
 
     sizes = args.sizes or (QUICK_SIZES if args.quick else ALL_SIZES)
@@ -198,17 +285,27 @@ def main():
             print(f"Unknown template: {t}")
             sys.exit(1)
 
+    # Auto-prepare: build optimized, download original, generate data.
+    if not args.orig_only:
+        build_optimized(skip_build=args.no_build)
+    if not args.opt_only:
+        download_original(skip_download=args.no_download)
+    if not args.no_generate:
+        ensure_data(sizes)
+
     binaries = []
     if not args.opt_only:
         if os.path.exists(ORIGINAL):
             binaries.append(("original", ORIGINAL))
         else:
             print(f"WARNING: Original binary not found at {ORIGINAL}")
+            print("  Set TYPST_BIN to a typst 0.14.2 path, or re-run without --no-download.")
     if not args.orig_only:
         if os.path.exists(OPTIMIZED):
             binaries.append(("optimized", OPTIMIZED))
         else:
             print(f"WARNING: Optimized binary not found at {OPTIMIZED}")
+            print("  Re-run without --no-build, or run `cargo build --release` from the repo root.")
 
     if not binaries:
         print("ERROR: No binaries found to test")
@@ -302,13 +399,17 @@ def main():
                     print(f"  Timeout: {timeout}s")
 
                     out_pdf = f"_bench_{bname}_{tname}_{label}.pdf"
-                    # Use relative paths and run from DATA_DIR (where both the
-                    # .typ template and data_*.json files live) to avoid
-                    # Windows backslash issues in Typst's --input path.
-                    rel_typ = os.path.basename(tmpl["file"])
-                    rel_data = os.path.basename(datafile)
-                    stats = run_test(bpath, rel_typ, rel_data, out_pdf,
-                                     timeout=timeout, cwd=DATA_DIR)
+                    # Use --root=benchmarks/ so the template (in templates/)
+                    # can read data files (in data/) — by default Typst
+                    # sandboxes file access to the template's directory.
+                    # The data path is relative to the root, using forward
+                    # slashes (Windows backslashes confuse typst's --input
+                    # arg parser, and `C:` in absolute paths gets parsed
+                    # as a key separator).
+                    rel_data = "/data/" + os.path.basename(datafile)
+                    stats = run_test(bpath, tmpl["file"], rel_data, out_pdf,
+                                     timeout=timeout, cwd=DATA_DIR,
+                                     root=BASE)
 
                     if stats["ok"]:
                         ram_ratio = round(stats["peak_ram_mb"] / data_size_mb, 1) if data_size_mb > 0.01 else 0

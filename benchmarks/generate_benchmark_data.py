@@ -151,21 +151,11 @@ def generate_advanced(path, total_rows):
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-
-    if len(sys.argv) > 1:
-        sizes = [int(x.replace(",", "").replace("_", "")) for x in sys.argv[1:]]
-    else:
-        sizes = ALL_SIZES
-
-    print(f"Generating benchmark data for {len(sizes)} sizes...")
-    print()
-
+def generate_all(out_dir, sizes):
+    os.makedirs(out_dir, exist_ok=True)
     for count in sizes:
         label = f"{count // 1000}k" if count >= 1000 else str(count)
 
-        # Simple format
         simple_path = os.path.join(out_dir, f"data_{label}.json")
         if not os.path.exists(simple_path):
             generate_simple(simple_path, count)
@@ -173,7 +163,6 @@ if __name__ == "__main__":
             size_mb = os.path.getsize(simple_path) / (1024 * 1024)
             print(f"  simple {count:>10,} rows -> {size_mb:>8.1f} MB  (exists)")
 
-        # Advanced format
         adv_path = os.path.join(out_dir, f"data_advanced_{label}.json")
         if not os.path.exists(adv_path):
             generate_advanced(adv_path, count)
@@ -181,4 +170,18 @@ if __name__ == "__main__":
             size_mb = os.path.getsize(adv_path) / (1024 * 1024)
             print(f"  advanced {count:>10,} rows -> {size_mb:>8.1f} MB  (exists)")
 
+
+if __name__ == "__main__":
+    # Default to benchmarks/data/. Env override TYPST_DATA_DIR.
+    base = os.path.dirname(os.path.abspath(__file__))
+    out_dir = os.environ.get("TYPST_DATA_DIR", os.path.join(base, "data"))
+
+    if len(sys.argv) > 1:
+        sizes = [int(x.replace(",", "").replace("_", "")) for x in sys.argv[1:]]
+    else:
+        sizes = ALL_SIZES
+
+    print(f"Generating benchmark data for {len(sizes)} sizes into {out_dir}...")
+    print()
+    generate_all(out_dir, sizes)
     print("\nDone!")
