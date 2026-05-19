@@ -32,6 +32,14 @@ use typst_kit::server::HttpServer;
 
 /// Execute a compilation command.
 pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
+    // One-shot compile mode: disable closure-evaluation memoization.
+    // dhat profiling shows the closure cache reaches ~1 GB on heavy
+    // dispatch-style templates (per-cell `cell-of(row, key, fmt-fn)`)
+    // because each call inserts a unique slab entry that's never
+    // re-hit. `watch` mode leaves it on so incremental recompiles
+    // can still benefit from closure caching.
+    typst::engine_flags::disable_closure_memoize();
+
     let mut timer = Timer::new_or_placeholder(command.args.timings.clone());
     let mut config = CompileConfig::new(command)?;
     if let Some(mode) = progress_mode(&command.args.progress, command.args.verbose) {

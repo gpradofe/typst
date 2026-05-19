@@ -67,6 +67,36 @@ pub fn is_cell_memoize_bypassed() -> bool {
     CELL_MEMOIZE_BYPASS.load(Ordering::Relaxed)
 }
 
+/// Whether closure-evaluation memoization is disabled.
+///
+/// `typst_eval::call::eval_closure` is `#[comemo::memoize]` so repeated
+/// closure invocations with the same args can hit the cache instead of
+/// re-evaluating. That's a huge win for `typst watch` (where most closures
+/// return identical values across edits) but a net loss for one-shot
+/// `typst compile` on heavy templates: each closure call inserts a new
+/// slab entry, the cache grows to ~1 GB at 50K rows for closure-dispatch-
+/// heavy patterns (per-cell `cell-of(row, key, fmt-fn)`-style code), and
+/// the entries are never re-hit because the arg combinations are unique.
+///
+/// The typst-cli's `compile` subcommand sets this to true; `watch` leaves
+/// it false so incremental recompiles still benefit from closure caching.
+static CLOSURE_MEMOIZE_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Disable closure memoization (for `typst compile` one-shot mode).
+pub fn disable_closure_memoize() {
+    CLOSURE_MEMOIZE_DISABLED.store(true, Ordering::Relaxed);
+}
+
+/// Re-enable closure memoization (for `typst watch` interactive mode).
+pub fn enable_closure_memoize() {
+    CLOSURE_MEMOIZE_DISABLED.store(false, Ordering::Relaxed);
+}
+
+/// Check whether closure memoization is currently disabled.
+pub fn is_closure_memoize_disabled() -> bool {
+    CLOSURE_MEMOIZE_DISABLED.load(Ordering::Relaxed)
+}
+
 /// Cumulative grid entry counter. Tracks total entries across all grids
 /// in the current layout pass. Used to trigger table-level memoize bypass
 /// for multi-table documents where individual tables are small (<500 entries)

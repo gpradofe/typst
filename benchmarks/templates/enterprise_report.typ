@@ -105,25 +105,31 @@
   ("Trade Date",   "trade_date",       fmt-date,     false),
   ("Security",     "security",         fmt-text,     false),
   ("Side",         "side",             fmt-text,     false),
+  ("CCY",          "posting_currency", fmt-text,     false),
   ("Quantity",     "quantity",         fmt-quantity, true),
   ("Price",        "price",            fmt-price,    true),
   ("Principal",    "principal",        fmt-money,    true),
   ("Commission",   "commission",       fmt-money,    true),
+  ("Net",          "principal",        fmt-money,    true),
   ("Rate",         "rate",             fmt-rate,     true),
   ("Basis",        "basis",            fmt-basis,    true),
+  ("Settle",       "trade_date",       fmt-date,     false),
+  ("Tick",         "ticket",           fmt-text,     false),
 )
 
 // Agg-fields used for group totals.
 // Each: (row-key, column-index, format-fn).
 #let agg-fields = (
-  ("principal",  6, fmt-money),
-  ("commission", 7, fmt-money),
+  ("principal",  7, fmt-money),
+  ("commission", 8, fmt-money),
+  ("principal",  9, fmt-money),
 )
 
-// ── Breadcrumb state (3 levels) ────────────────────────────────────────────
+// ── Breadcrumb state (3 levels) + per-row counter ──────────────────────────
 #let grp1 = state("grp-1", "")
 #let grp2 = state("grp-2", "")
 #let grp3 = state("grp-3", "")
+#let row-counter = counter("rows")
 
 // ── Page setup with per-class margin ───────────────────────────────────────
 #set page(
@@ -138,18 +144,22 @@
   header: context {
     // layout() measures the available width per page — blocks comemo
     // memoization of the header content because each page may differ.
+    // Production code measures multiple text widths per header (title,
+    // account name, date) so we mirror that with three measure passes.
     layout(size => {
-      // Logo placeholder (a colored rect — keeps the cost without an
-      // external image asset).
+      let title-w = measure([
+        #text(size: 11pt, weight: "bold")[#metadata.report_title — #metadata.account_name]
+      ]).width
+      let date-w = measure(text(size: 8pt, metadata.report_date)).width
+      let acct-w = measure(text(size: 8pt, metadata.account_number)).width
+      let avail = size.width - 60mm - date-w - acct-w
       let logo = rect(width: 16mm, height: 6mm, fill: rgb("#003366"),
         stroke: none, inset: 0pt)
-      // Title text gets truncated via box(width, clip: true) to mimic
-      // the production header.
-      let title = box(width: size.width - 80mm, clip: true, [
+      let title-clipped = box(width: calc.min(title-w, avail), clip: true, [
         #text(size: 11pt, weight: "bold")[#metadata.report_title — #metadata.account_name]
       ])
       stack(dir: ltr, spacing: 4mm,
-        logo, title,
+        logo, title-clipped,
         align(right + horizon, text(size: 8pt, [
           #metadata.account_number · #metadata.report_date
         ])),
@@ -166,20 +176,25 @@
       }
       v(0.5mm)
       line(length: 100%, stroke: 0.4pt + gray)
-      // Disclaimer paragraph below header.
+      // Disclaimer paragraph below header (longer than v1).
       v(1mm)
-      text(size: 6.5pt, fill: gray, disclaimers.report.slice(0, 220) + "…")
+      // Use up to 400 chars of regulatory text, or all of it if shorter.
+      let reg = disclaimers.regulatory
+      let reg-snippet = if reg.len() > 400 { reg.slice(0, 400) } else { reg }
+      text(size: 6.5pt, fill: gray, disclaimers.report + " " + reg-snippet + "…")
     })
   },
   footer: context {
     line(length: 100%, stroke: 0.3pt + gray)
     set text(size: 6pt, fill: gray)
-    // 3 disclaimer paragraphs every page.
+    // 4 disclaimer paragraphs every page (more chars than v1).
+    block(spacing: 1.2pt, disclaimers.report)
     block(spacing: 1.2pt, disclaimers.regulatory)
     block(spacing: 1.2pt, disclaimers.confidentiality)
     block(spacing: 1.2pt, disclaimers.footnotes.join(" "))
-    grid(columns: (1fr, 1fr),
+    grid(columns: (1fr, 1fr, 1fr),
       align(left, [Advisor: #advisor.advisor_name (#advisor.und_code)]),
+      align(center, [Row counter: #context row-counter.display()]),
       align(right, [Page #counter(page).display() / #context counter(page).final().first()]),
     )
   },
@@ -204,14 +219,30 @@
 #let thick-stroke = 1pt + rgb("#003366")
 #let dashed-row-sep = (paint: rgb("#888"), thickness: 0.2pt, dash: "dashed")
 
+// ── Per-cell show rule (fires on EVERY table cell) ─────────────────────────
+// Wraps every cell body in a padded box. Production templates often have
+// 2-3 show rules like this stacked; one is enough to materially affect cost.
+#show table.cell: it => box(inset: (left: 1pt, right: 1pt), it.body)
+
 // ── Table row builder ──────────────────────────────────────────────────────
 #let build-row(row) = {
-  // 10-column dispatch via columns-spec — every cell goes through cell-of
-  // which checks `key in row` then calls the format fn.
-  columns-spec.map(spec => {
+  // Per-row state: increments the running row counter shown in the footer.
+  let cells = columns-spec.map(spec => {
     let (_, key, fmt-fn, _) = spec
     cell-of(row, key, fmt-fn)
   })
+  cells.at(0) = [#row-counter.step()#cells.at(0)]
+  // ~20% of rows get a "notes" sub-row appended — mimics detail expansions.
+  let notes = if "asterisk" in row {
+    (table.cell(colspan: columns-spec.len(),
+      fill: rgb("#fffaf0"),
+      pad(x: 4pt, y: 1pt,
+        text(size: 6pt, fill: rgb("#666"),
+          "Note: settled outside standard T+2 cycle. " +
+          "See footnote (1) on every page for additional context regarding " +
+          "the timing of this trade and any FX adjustments applied."))),)
+  } else { () }
+  (cells, notes)
 }
 
 // ── Group total renderer (3 levels) ────────────────────────────────────────
@@ -276,6 +307,14 @@
       // Hidden level-5 heading too (extra bookmark depth).
       heading(level: 5, leaf.code)
 
+      // Build all rows (cells + optional notes sub-rows) for this leaf.
+      let leaf-cells = ()
+      for row in leaf.rows {
+        let (cells, notes) = build-row(row)
+        leaf-cells += cells
+        leaf-cells += notes
+      }
+
       // Table for this leaf's rows.
       table(
         columns: columns-spec.len(),
@@ -297,7 +336,7 @@
               text(fill: white, weight: "bold", spec.at(0)))
           )
         ),
-        ..leaf.rows.map(build-row).flatten(),
+        ..leaf-cells,
       )
     }
 
