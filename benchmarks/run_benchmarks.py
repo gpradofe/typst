@@ -74,6 +74,13 @@ TEMPLATES = {
         "data_format": "advanced",
         "description": "Multiple tables (one per group), headers/footers, alternating fills",
     },
+    "enterprise": {
+        "file": os.path.join(TEMPLATE_DIR, "enterprise_report.typ"),
+        "data_format": "enterprise",
+        "description": ("4-file load, 3-level nesting, 10 cols, layout(size=>) "
+                        "header, footer disclaimers, 5-level bookmarks, 3-level "
+                        "group totals, per-cell key-dispatch + format fns"),
+    },
 }
 
 # ── Sizes ──────────────────────────────────────────────────────────────────
@@ -123,12 +130,13 @@ def monitor_memory(proc, result, interval=0.02):
     result["samples"] = samples
 
 
-def run_test(typst_exe, typ_file, datafile, output_pdf, timeout=600, cwd=None, root=None):
+def run_test(typst_exe, typ_file, datafile, output_pdf, timeout=600, cwd=None,
+             root=None, input_key="datafile"):
     """Run a single typst compile and return metrics."""
     cmd = [typst_exe, "compile"]
     if root:
         cmd.extend(["--root", root])
-    cmd.extend([typ_file, output_pdf, "--input", f"datafile={datafile}"])
+    cmd.extend([typ_file, output_pdf, "--input", f"{input_key}={datafile}"])
     result = {"peak_rss": 0, "samples": 0}
     start = time.time()
     try:
@@ -242,21 +250,41 @@ def download_original(skip_download=False):
     return False
 
 
-def ensure_data(sizes):
+def ensure_data(sizes, template_names):
     """Generate any missing JSON data files for the requested sizes."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    missing = []
-    for s in sizes:
-        label = f"{s // 1000}k" if s >= 1000 else str(s)
-        for fname in (f"data_{label}.json", f"data_advanced_{label}.json"):
-            if not os.path.exists(os.path.join(DATA_DIR, fname)):
+    needs_basic = any(TEMPLATES[t]["data_format"] in ("simple", "advanced")
+                      for t in template_names)
+    needs_enterprise = any(TEMPLATES[t]["data_format"] == "enterprise"
+                           for t in template_names)
+
+    if needs_basic:
+        missing = []
+        for s in sizes:
+            label = f"{s // 1000}k" if s >= 1000 else str(s)
+            for fname in (f"data_{label}.json", f"data_advanced_{label}.json"):
+                if not os.path.exists(os.path.join(DATA_DIR, fname)):
+                    missing.append(s)
+                    break
+        if missing:
+            print(f"Generating missing data files for sizes: {missing}")
+            import generate_benchmark_data
+            generate_benchmark_data.generate_all(DATA_DIR, missing)
+
+    if needs_enterprise:
+        missing = []
+        for s in sizes:
+            label = f"{s // 1000}k" if s >= 1000 else str(s)
+            ds = os.path.join(DATA_DIR, f"enterprise_{label}")
+            if not os.path.exists(os.path.join(ds, "ticket_fee_detail.json")):
                 missing.append(s)
-                break
-    if not missing:
-        return
-    print(f"Generating missing data files for sizes: {missing}")
-    import generate_benchmark_data
-    generate_benchmark_data.generate_all(DATA_DIR, missing)
+        if missing:
+            print(f"Generating missing enterprise datasets for sizes: {missing}")
+            import generate_enterprise_data
+            for s in missing:
+                label = f"{s // 1000}k" if s >= 1000 else str(s)
+                out_dir = os.path.join(DATA_DIR, f"enterprise_{label}")
+                generate_enterprise_data.generate_one(out_dir, s)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -291,7 +319,7 @@ def main():
     if not args.opt_only:
         download_original(skip_download=args.no_download)
     if not args.no_generate:
-        ensure_data(sizes)
+        ensure_data(sizes, template_names)
 
     binaries = []
     if not args.opt_only:
@@ -355,6 +383,9 @@ def main():
                         datafile = os.path.join(DATA_DIR,f"data_{label}.json")
                 else:
                     datafile = os.path.join(DATA_DIR,f"data_{label}.json")
+            elif fmt == "enterprise":
+                # Multi-file dataset under data/enterprise_<label>/
+                datafile = os.path.join(DATA_DIR, f"enterprise_{label}")
             else:
                 old_names = {100: "tiny", 1000: "small", 10000: "medium"}
                 if size in old_names:
@@ -364,11 +395,20 @@ def main():
                 else:
                     datafile = os.path.join(DATA_DIR,f"data_advanced_{label}.json")
 
-            if not os.path.exists(datafile):
-                print(f"\n  SKIP {tname} @ {size:,} — data file not found: {os.path.basename(datafile)}")
-                continue
-
-            data_size_mb = round(os.path.getsize(datafile) / (1024 * 1024), 2)
+            if fmt == "enterprise":
+                detail = os.path.join(datafile, "ticket_fee_detail.json")
+                if not os.path.isdir(datafile) or not os.path.exists(detail):
+                    print(f"\n  SKIP {tname} @ {size:,} — dataset dir not found: {os.path.basename(datafile)}")
+                    continue
+                data_size_mb = round(sum(
+                    os.path.getsize(os.path.join(datafile, f))
+                    for f in os.listdir(datafile)
+                ) / (1024 * 1024), 2)
+            else:
+                if not os.path.exists(datafile):
+                    print(f"\n  SKIP {tname} @ {size:,} — data file not found: {os.path.basename(datafile)}")
+                    continue
+                data_size_mb = round(os.path.getsize(datafile) / (1024 * 1024), 2)
 
             if not os.path.exists(tmpl["file"]):
                 print(f"\n  SKIP {tname} — template not found")
@@ -402,14 +442,19 @@ def main():
                     # Use --root=benchmarks/ so the template (in templates/)
                     # can read data files (in data/) — by default Typst
                     # sandboxes file access to the template's directory.
-                    # The data path is relative to the root, using forward
+                    # The path is relative to the root, using forward
                     # slashes (Windows backslashes confuse typst's --input
                     # arg parser, and `C:` in absolute paths gets parsed
                     # as a key separator).
-                    rel_data = "/data/" + os.path.basename(datafile)
-                    stats = run_test(bpath, tmpl["file"], rel_data, out_pdf,
+                    if fmt == "enterprise":
+                        input_key = "dataroot"
+                        input_val = "data/" + os.path.basename(datafile)
+                    else:
+                        input_key = "datafile"
+                        input_val = "/data/" + os.path.basename(datafile)
+                    stats = run_test(bpath, tmpl["file"], input_val, out_pdf,
                                      timeout=timeout, cwd=DATA_DIR,
-                                     root=BASE)
+                                     root=BASE, input_key=input_key)
 
                     if stats["ok"]:
                         ram_ratio = round(stats["peak_ram_mb"] / data_size_mb, 1) if data_size_mb > 0.01 else 0
