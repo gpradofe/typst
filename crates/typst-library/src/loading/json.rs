@@ -1,10 +1,134 @@
-use ecow::eco_format;
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::fmt;
+
+use ecow::{EcoVec, eco_format};
+use indexmap::IndexMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use serde::de::{
+    DeserializeSeed, Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor,
+};
 use typst_syntax::Spanned;
 
 use crate::diag::{At, LineCol, LoadError, LoadedWithin, SourceResult, bail};
 use crate::engine::Engine;
-use crate::foundations::{Str, Value, func, scope};
+use crate::foundations::{Array, Datetime, Dict, IntoValue, Str, Value, func, scope};
 use crate::loading::{DataSource, Load, Readable};
+
+/// Deduplicates equal strings encountered while deserializing JSON so that the
+/// resulting value tree shares a single [`Str`] allocation per distinct string.
+///
+/// Data-heavy JSON repeats the same dictionary keys on every record (e.g. a
+/// report with millions of rows repeats its ~10 column keys on each row) and
+/// reuses a small set of categorical values (currencies, dates, names). Without
+/// interning, each repetition is a fresh heap allocation; interning collapses
+/// them to one, which can cut the parsed tree's peak memory by gigabytes for
+/// large inputs. Unique strings (e.g. per-row identifiers) cost one extra hash
+/// lookup and are stored once, as before.
+#[derive(Default)]
+struct Interner {
+    strings: FxHashMap<Box<str>, Str>,
+}
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> Str {
+        if let Some(existing) = self.strings.get(s) {
+            existing.clone()
+        } else {
+            let value: Str = s.into();
+            self.strings.insert(Box::from(s), value.clone());
+            value
+        }
+    }
+}
+
+/// A [`DeserializeSeed`] threading an [`Interner`] through the value tree.
+struct InterningSeed<'a>(&'a RefCell<Interner>);
+
+impl<'de> DeserializeSeed<'de> for InterningSeed<'_> {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<Value, D::Error> {
+        de.deserialize_any(InterningVisitor(self.0))
+    }
+}
+
+/// Mirrors typst's standard `ValueVisitor` for the value types JSON can
+/// produce, but interns every string (dict key or string value). Numeric and
+/// boolean handling is identical to the standard visitor, so the resulting
+/// `Value` is byte-for-byte equivalent — only string allocations are shared.
+struct InterningVisitor<'a>(&'a RefCell<Interner>);
+
+impl<'de> Visitor<'de> for InterningVisitor<'_> {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a Typst value")
+    }
+
+    fn visit_bool<E: DeError>(self, v: bool) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+    fn visit_i64<E: DeError>(self, v: i64) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+    fn visit_i128<E: DeError>(self, v: i128) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+    fn visit_u64<E: DeError>(self, v: u64) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+    fn visit_u128<E: DeError>(self, v: u128) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+    fn visit_f64<E: DeError>(self, v: f64) -> Result<Value, E> {
+        Ok(v.into_value())
+    }
+
+    fn visit_str<E: DeError>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::Str(self.0.borrow_mut().intern(v)))
+    }
+    fn visit_borrowed_str<E: DeError>(self, v: &'de str) -> Result<Value, E> {
+        Ok(Value::Str(self.0.borrow_mut().intern(v)))
+    }
+    fn visit_string<E: DeError>(self, v: String) -> Result<Value, E> {
+        Ok(Value::Str(self.0.borrow_mut().intern(&v)))
+    }
+
+    fn visit_none<E: DeError>(self) -> Result<Value, E> {
+        Ok(Value::None)
+    }
+    fn visit_unit<E: DeError>(self) -> Result<Value, E> {
+        Ok(Value::None)
+    }
+    fn visit_some<D: Deserializer<'de>>(self, de: D) -> Result<Value, D::Error> {
+        de.deserialize_any(self)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = EcoVec::new();
+        while let Some(value) = seq.next_element_seed(InterningSeed(self.0))? {
+            items.push(value);
+        }
+        Ok(Value::Array(Array::from(items)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut dict = IndexMap::<Str, Value, FxBuildHasher>::default();
+        while let Some(key) = map.next_key::<Cow<str>>()? {
+            let key = self.0.borrow_mut().intern(&key);
+            let value = map.next_value_seed(InterningSeed(self.0))?;
+            dict.insert(key, value);
+        }
+        // Preserve the standard visitor's TOML-datetime detection so output is
+        // identical to the non-interning path.
+        let dict = Dict::from(dict);
+        Ok(match Datetime::from_toml_dict(&dict) {
+            None => dict.into_value(),
+            Some(datetime) => datetime.into_value(),
+        })
+    }
+}
 
 /// Reads structured data from a JSON file.
 ///
@@ -119,7 +243,17 @@ pub fn json(
         );
     }
 
-    serde_json::from_slice(raw)
+    // Deserialize directly into a `Value`, interning repeated strings (dict
+    // keys and categorical string values) so large data files don't allocate a
+    // fresh `Str` for every repetition. This is byte-for-byte equivalent to the
+    // standard `serde_json::from_slice::<Value>(raw)` path — only string
+    // allocations are shared — but cuts peak memory dramatically for inputs
+    // with heavy key/value repetition (e.g. million-row reports).
+    let interner = RefCell::new(Interner::default());
+    let mut de = serde_json::Deserializer::from_slice(raw);
+    InterningSeed(&interner)
+        .deserialize(&mut de)
+        .and_then(|value| de.end().map(|()| value))
         .map_err(|err| {
             let pos = LineCol::one_based(err.line(), err.column());
             LoadError::new(pos, "failed to parse JSON", err)

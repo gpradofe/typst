@@ -228,12 +228,35 @@ pub fn build_from_store(
 
         // After the first page, estimate total groups and pre-allocate.
         // This avoids Vec doubling waste during tree building.
+        //
+        // The estimate `groups_per_page * page_count` extrapolates from the
+        // first page. For documents with many tiny tables (sparse data), page 0
+        // packs a large number of groups AND page_count is large, so the naive
+        // product overshoots the true total by orders of magnitude — a 300K-row
+        // / 100K-table document produced an estimate large enough to ask for
+        // ~247 GB, aborting the process. We therefore (a) compute in u64 to
+        // avoid usize overflow and (b) cap the reservation: amortized Vec
+        // doubling handles any remaining growth in O(n), so a bounded
+        // pre-reservation is all we want — never a multi-gigabyte speculative
+        // allocation.
         if i == 0 && page_count > 10 {
-            let groups_per_page = tree.groups.list.len();
-            let estimate = groups_per_page * page_count;
+            let groups_per_page = tree.groups.list.len() as u64;
+            let estimate = groups_per_page.saturating_mul(page_count as u64);
+            // Cap the speculative reservation. Beyond this, natural growth is
+            // cheap and a larger up-front allocation risks exhausting memory
+            // for pathologically table-dense documents.
+            const MAX_PREALLOC: u64 = 4_000_000;
+            let estimate = estimate.min(MAX_PREALLOC);
+            if std::env::var("TYPST_DEBUG_STREAMING").is_ok() {
+                eprintln!(
+                    "[TAGS] build_from_store: groups_per_page={groups_per_page} \
+                     page_count={page_count} estimate(capped)={estimate}"
+                );
+            }
             if estimate > 1000 {
-                let additional =
-                    (estimate + estimate / 5).saturating_sub(tree.groups.list.capacity());
+                let additional = (estimate + estimate / 5)
+                    .saturating_sub(tree.groups.list.capacity() as u64)
+                    as usize;
                 if additional > 0 {
                     tree.groups.list.reserve(additional);
                     tree.groups.tags.reserve(additional);

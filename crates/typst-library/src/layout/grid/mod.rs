@@ -609,6 +609,20 @@ pub struct GridHeader {
     #[default(NonZeroU32::ONE)]
     pub level: NonZeroU32,
 
+    /// If `true`, this header does NOT appear on the first page where the
+    /// grid starts; it only appears when the grid continues to subsequent
+    /// pages.
+    ///
+    /// Useful for "continuation" content like "(Cont.)" suffixes or repeated
+    /// column labels that should appear only on continuation pages but would
+    /// be redundant on the first page where the grid begins. Combine with a
+    /// separate `header(repeat: false)` to render distinct first-page-only
+    /// and continuation-only content without consulting the introspector.
+    ///
+    /// Has no effect when `repeat` is `false`.
+    #[default(false)]
+    pub skip_first_page: bool,
+
     /// The cells and lines within the header.
     #[variadic]
     pub children: Vec<GridItem>,

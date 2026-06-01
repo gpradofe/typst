@@ -326,6 +326,13 @@ impl<'a> GridLayouter<'a> {
 
         let mut has_non_repeated_pending_header = false;
         for header in self.pending_headers {
+            // Skip rendering of `skip_first_page` headers in the pending pipeline —
+            // these are continuation-only headers that mustn't appear on the first
+            // page. They get rendered on subsequent regions once they transition
+            // from pending → repeating after the first data row is placed.
+            if header.repeated && header.skip_first_page {
+                continue;
+            }
             if !header.repeated {
                 self.current.initial_after_repeats = self.regions.size.y;
                 has_non_repeated_pending_header = true;
@@ -367,9 +374,13 @@ impl<'a> GridLayouter<'a> {
     ) -> SourceResult<bool> {
         // At first, only consider the height of the given headers. However,
         // for upcoming regions, we will have to consider repeating headers as
-        // well.
+        // well. `skip_first_page` headers are filtered out: they don't render
+        // on this (first) appearance, so they reserve no height here.
         let header_height = self.simulate_header_height(
-            headers.iter().map(Repeatable::deref),
+            headers
+                .iter()
+                .filter(|h| !(h.repeated && h.skip_first_page))
+                .map(Repeatable::deref),
             &self.regions,
             engine,
             0,
@@ -402,10 +413,29 @@ impl<'a> GridLayouter<'a> {
 
         let mut at_top = self.regions.size.y == self.current.initial_after_repeats;
 
-        self.unbreakable_rows_left +=
-            total_header_row_count(headers.iter().map(Repeatable::deref));
+        self.unbreakable_rows_left += total_header_row_count(
+            headers
+                .iter()
+                .filter(|h| !(h.repeated && h.skip_first_page))
+                .map(Repeatable::deref),
+        );
 
         for header in headers {
+            // Skip rendering on the table's first page for headers marked as
+            // continuation-only. They are still placed into pending_headers /
+            // repeating_headers by the caller (place_new_headers), so
+            // layout_active_headers will render them on subsequent regions.
+            //
+            // Push a 0pt placeholder to repeating_header_heights so indices stay
+            // aligned with repeating_headers; the next region's
+            // layout_active_headers clears and rebuilds this vector.
+            if header.repeated && header.skip_first_page {
+                if !short_lived {
+                    self.current.repeating_header_heights.push(Abs::zero());
+                }
+                continue;
+            }
+
             let header_height =
                 self.layout_header_rows(header, engine, 0, false, false)?;
 

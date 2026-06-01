@@ -259,6 +259,7 @@ pub fn grid_to_cellgrid(
         GridChild::Header(header) => ResolvableGridChild::Header {
             repeat: header.repeat.get(styles),
             level: header.level.get(styles),
+            skip_first_page: header.skip_first_page.get(styles),
             span: header.span(),
             items: header.children.iter().map(resolve_item),
         },
@@ -311,6 +312,7 @@ pub fn table_to_cellgrid(
         TableChild::Header(header) => ResolvableGridChild::Header {
             repeat: header.repeat.get(styles),
             level: header.level.get(styles),
+            skip_first_page: header.skip_first_page.get(styles),
             span: header.span(),
             items: header.children.iter().map(resolve_item),
         },
@@ -760,6 +762,10 @@ pub struct Header {
     /// it is at the end of the table (possibly followed by some footers at the
     /// end).
     pub short_lived: bool,
+    /// If true, this header is suppressed on the first appearance of the
+    /// table (the page where it starts) and only rendered when the table
+    /// continues to subsequent pages. Honored only when `repeat` is true.
+    pub skip_first_page: bool,
 }
 
 /// A repeatable grid footer. Stops at the last row.
@@ -1030,7 +1036,7 @@ impl Entry {
 
 /// Any grid child, which can be either a header or an item.
 pub enum ResolvableGridChild<T: ResolvableCell, I> {
-    Header { repeat: bool, level: NonZeroU32, span: Span, items: I },
+    Header { repeat: bool, level: NonZeroU32, skip_first_page: bool, span: Span, items: I },
     Footer { repeat: bool, span: Span, items: I },
     Item(ResolvableGridItem<T>),
 }
@@ -1592,6 +1598,11 @@ struct RowGroupData {
     /// Whether this header or footer may repeat.
     repeat: bool,
 
+    /// For headers: whether to suppress this header on the first page where
+    /// the table starts (only render it on continuation pages).
+    /// Ignored for footers.
+    skip_first_page: bool,
+
     /// Level of this header or footer.
     repeatable_level: NonZeroU32,
 
@@ -1848,7 +1859,7 @@ impl CellGridResolver<'_, '_> {
         let cell_kind;
 
         let (header_footer_items, simple_item) = match child {
-            ResolvableGridChild::Header { repeat, level, span, items } => {
+            ResolvableGridChild::Header { repeat, level, skip_first_page, span, items } => {
                 cell_kind =
                     Smart::Custom(TableCellKind::Header(level, TableHeaderScope::Column));
 
@@ -1857,6 +1868,7 @@ impl CellGridResolver<'_, '_> {
                     span,
                     kind: RowGroupKind::Header,
                     repeat,
+                    skip_first_page,
                     repeatable_level: level,
                     top_hlines_start: pending_hlines.len(),
                     top_hlines_end: None,
@@ -1889,6 +1901,7 @@ impl CellGridResolver<'_, '_> {
                     range: None,
                     span,
                     repeat,
+                    skip_first_page: false,
                     kind: RowGroupKind::Footer,
                     repeatable_level: NonZeroU32::ONE,
                     top_hlines_start: pending_hlines.len(),
@@ -2252,6 +2265,8 @@ impl CellGridResolver<'_, '_> {
                         // This can only change at a later iteration, if we
                         // find a conflicting header or footer right away.
                         short_lived: false,
+
+                        skip_first_page: row_group.skip_first_page,
                     };
 
                     headers.push(Repeatable { inner: data, repeated: row_group.repeat });
@@ -2471,7 +2486,16 @@ impl CellGridResolver<'_, '_> {
             footer.as_ref().map(|(_, _, f)| f.start).unwrap_or(row_amount);
         let mut last_consec_level = 0;
         for header in headers.iter_mut().rev() {
-            if header.range.end == consecutive_header_start
+            if header.skip_first_page {
+                // Headers with `skip_first_page` are continuation-only and form a
+                // hard barrier in the short-lived displacement chain. They are never
+                // short-lived themselves, and they must NOT update
+                // `consecutive_header_start` or `last_consec_level` because earlier
+                // headers in document order must see the chain as if this header
+                // weren't part of it (otherwise the engine's short-lived render path
+                // skips the orphan snapshot needed for rollback).
+                continue;
+            } else if header.range.end == consecutive_header_start
                 && header.level.get() >= last_consec_level
             {
                 header.short_lived = true;

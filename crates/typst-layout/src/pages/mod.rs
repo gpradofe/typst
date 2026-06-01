@@ -258,9 +258,25 @@ fn layout_pages_streaming<'a>(
     //   Each department has its own page run (8+ runs). Rayon gives 2-3x
     //   speedup. Pages flushed to disk after parallel results arrive.
     let has_many_tables = cumulative_entries >= 50_000;
-    let use_streaming_layout = has_large_grid || (has_many_tables && run_count <= 4);
-    // Flush to DiskPageStore for all large documents (streaming or parallel).
-    let mut flushing = streaming || use_streaming_layout || has_many_tables;
+    // Route few-run documents through the page-by-page streaming path so that
+    // disk-flushing can be triggered dynamically by PAGE COUNT (see the
+    // mid-stream flush in process_page). The previous gate keyed on the
+    // cumulative grid-entry counter, but that counter is only populated during
+    // *realization* for auto-width tables; fractional-width (`fr`) tables resolve
+    // their grids during *layout*, after this decision is made, so the counter
+    // reads 0 and large `fr`-column multi-table documents (e.g. financial
+    // reports with thousands of small tables) silently fell back to the
+    // all-in-memory parallel path and used 10-30x the RAM. Page count is always
+    // available and reliable. Documents with many page runs (>4, e.g. the stress
+    // test with one run per department) keep the chunked-parallel path for its
+    // rayon speedup.
+    let use_streaming_layout = has_large_grid || run_count <= 4;
+    // Start flushing immediately only when we already know the document is large
+    // (streaming Phase 2, or the realize-time counter already tripped). Otherwise
+    // `flushing` stays false and the mid-stream trigger in process_page enables it
+    // once the page count crosses FLUSH_THRESHOLD — this keeps small documents
+    // fully in memory (no disk I/O) while bounding peak RAM for large ones.
+    let mut flushing = streaming || has_many_tables;
     let mut store: Option<DiskPageStore> = if flushing {
         Some(
             DiskPageStore::new()
@@ -291,7 +307,12 @@ fn layout_pages_streaming<'a>(
         // Flush in ALL iterations to bound peak memory. Without this,
         // iter2+ accumulates all pages in memory (~27GB at 600K rows),
         // causing heavy swapping on 32GB machines.
-        if !*flushing && has_large_grid && *total_pages + 1 > FLUSH_THRESHOLD {
+        // No longer gated on has_large_grid: any document that grows past
+        // FLUSH_THRESHOLD pages starts flushing, so large multi-table /
+        // fr-column documents (whose grid counter reads 0 at the layout-strategy
+        // gate) are bounded too. Flushing is output-preserving (pages are
+        // reconstructed from the store for export), so this is byte-identical.
+        if !*flushing && *total_pages + 1 > FLUSH_THRESHOLD {
             let mut s = DiskPageStore::new()
                 .map_err(|e| ecow::eco_format!("disk store creation failed: {e}"))
                 .at(typst_syntax::Span::detached())?;
