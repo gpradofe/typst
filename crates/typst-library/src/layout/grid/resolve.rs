@@ -77,6 +77,87 @@ thread_local! {
         RefCell::new(FxHashMap::default());
 }
 
+/// Builds the `Packed<TableCell>` wrapper for a table cell from its resolved
+/// fields. This is the single source of truth for the wrapper, used both
+/// eagerly during resolution (the default) and on-the-fly at layout time (via
+/// [`reconstruct_table_cell_body`]) for huge tables — so the two paths produce
+/// byte-identical content.
+#[allow(clippy::too_many_arguments)]
+fn build_packed_table_cell(
+    body: Content,
+    x: usize,
+    y: usize,
+    colspan: NonZeroUsize,
+    rowspan: NonZeroUsize,
+    fill: Option<Paint>,
+    align: Smart<Alignment>,
+    inset: Sides<Option<Rel<Length>>>,
+    stroke: &Arc<Sides<Option<Arc<Stroke<Abs>>>>>,
+    breakable: bool,
+    kind: Smart<TableCellKind>,
+    span: Span,
+) -> Content {
+    // Convert the resolved Abs stroke to the Length stroke the Packed cell
+    // carries, deduplicating via the thread-local cache.
+    let converted_stroke = (**stroke).clone().map(|side| {
+        Some(side.as_ref().map(|cell_stroke| {
+            let hash = typst_utils::hash128(&**cell_stroke);
+            STROKE_CONV_CACHE.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .entry(hash)
+                    .or_insert_with(|| Arc::new((**cell_stroke).clone().map(Length::from)))
+                    .clone()
+            })
+        }))
+    });
+    let new_cell = TableCell::new(body)
+        .with_x(Smart::Custom(x))
+        .with_y(Smart::Custom(y))
+        .with_colspan(colspan)
+        .with_rowspan(rowspan)
+        .with_fill(Smart::Custom(fill))
+        .with_align(align)
+        .with_inset(Smart::Custom(inset))
+        .with_stroke(converted_stroke)
+        .with_breakable(Smart::Custom(breakable))
+        .with_kind(kind);
+    Packed::new(new_cell).spanned(span).pack()
+}
+
+/// Rebuilds the `Packed<TableCell>` wrapper for a cell whose body was stored
+/// raw during resolution (see [`Cell::reconstruct_packed`]). Called at layout
+/// time so the wrapper is short-lived instead of being held for all N cells.
+/// Produces byte-identical content to the eager path because both go through
+/// [`build_packed_table_cell`].
+pub fn reconstruct_table_cell_body(cell: &Cell) -> Content {
+    let (x, y, kind) = match &cell.source {
+        Some(CellSource::Table { cell_x, cell_y, kind }) => {
+            (*cell_x as usize, *cell_y as usize, *kind)
+        }
+        // Should not happen: reconstruct_packed is only set for table cells.
+        _ => return cell.body.clone(),
+    };
+    let inset = cell.resolved_inset.as_deref().cloned().unwrap_or_default();
+    let fill = cell.fill.as_deref().cloned();
+    let colspan = NonZeroUsize::new(cell.colspan.get() as usize).unwrap_or(NonZeroUsize::MIN);
+    let rowspan = NonZeroUsize::new(cell.rowspan.get() as usize).unwrap_or(NonZeroUsize::MIN);
+    build_packed_table_cell(
+        cell.body.clone(),
+        x,
+        y,
+        colspan,
+        rowspan,
+        fill,
+        cell.resolved_align,
+        inset,
+        &cell.stroke,
+        cell.breakable,
+        kind,
+        cell.source_span,
+    )
+}
+
 /// Global CellGrid cache, shared across all threads. Uses Mutex so
 /// `clear_cellgrid_cache()` can free memory regardless of which thread
 /// populated the cache (rayon worker threads may differ from main thread).
@@ -432,6 +513,7 @@ impl ResolvableCell for Packed<TableCell> {
         breakable: bool,
         styles: StyleChain,
         kind: Smart<TableCellKind>,
+        defer_packed: bool,
     ) -> Cell {
         // READ phase: all through Deref (immutable, no make_unique)
         let colspan = self.colspan.get(styles);
@@ -480,46 +562,41 @@ impl ResolvableCell for Packed<TableCell> {
         };
         let computed_inset =
             self.inset.get(styles).map_or(inset, |inner| inner.fold(inset));
-        // CONSTRUCT phase: if no user show rules target table.cell, skip
-        // the Packed<TableCell> allocation entirely. Inset/align will be
-        // applied on-the-fly in layout_cell, keeping cell.body lightweight.
+        // CONSTRUCT phase. Three modes for `cell.body`:
+        //  * No user show rule targets table.cell: store the raw body and
+        //    apply inset/align on-the-fly in layout_cell (apply_inset_align).
+        //  * Show rule + `defer_packed` (paged, no auto columns): store the
+        //    raw body and rebuild the Packed<TableCell> wrapper on-the-fly in
+        //    layout_cell (reconstruct_packed). This avoids holding the
+        //    ~400 B/cell Packed wrapper for all N cells simultaneously during
+        //    resolution — the single biggest peak-RAM driver for huge tables.
+        //  * Show rule, not deferred (auto columns / non-paged): build and
+        //    store the Packed<TableCell> wrapper now (original behavior).
         let source_span = self.span();
-        let (body, apply_inset_align, cell_resolved_inset) =
-            if needs_packed_cell(styles, Element::of::<TableCell>()) {
-                // User show rules exist: keep Packed wrapper for matching.
-                // Clone the Arc'd stroke Sides for the converted_stroke.
-                let converted_stroke = (*stroke).clone().map(|side| {
-                    Some(side.as_ref().map(|cell_stroke| {
-                        let hash = typst_utils::hash128(&**cell_stroke);
-                        STROKE_CONV_CACHE.with(|cache| {
-                            cache
-                                .borrow_mut()
-                                .entry(hash)
-                                .or_insert_with(|| {
-                                    Arc::new((**cell_stroke).clone().map(Length::from))
-                                })
-                                .clone()
-                        })
-                    }))
-                });
-                let body = self.body.clone();
-                let new_cell = TableCell::new(body)
-                    .with_x(Smart::Custom(x))
-                    .with_y(Smart::Custom(y))
-                    .with_colspan(colspan)
-                    .with_rowspan(rowspan)
-                    .with_fill(Smart::Custom(fill.clone()))
-                    .with_align(resolved_align)
-                    .with_inset(Smart::Custom(computed_inset))
-                    .with_stroke(converted_stroke)
-                    .with_breakable(Smart::Custom(breakable))
-                    .with_kind(kind);
-                // Packed cell carries inset; don't duplicate in Cell.
-                (Packed::new(new_cell).spanned(source_span).pack(), false, None)
+        let needs_packed = needs_packed_cell(styles, Element::of::<TableCell>());
+        let (body, apply_inset_align, reconstruct_packed, cell_resolved_inset) =
+            if needs_packed && !defer_packed {
+                // Build and store the Packed wrapper now (carries its inset).
+                let body = build_packed_table_cell(
+                    self.body.clone(),
+                    x,
+                    y,
+                    colspan,
+                    rowspan,
+                    fill.clone(),
+                    resolved_align,
+                    computed_inset,
+                    &stroke,
+                    breakable,
+                    kind,
+                    source_span,
+                );
+                (body, false, false, None)
             } else {
-                // No user show rules: store raw body. Inset/align applied
-                // on-the-fly in layout_cell from resolved_inset/resolved_align.
-                // Arc-share inset via hash cache.
+                // Store the raw body. Share the computed inset via the cache so
+                // layout_cell can apply it (apply_inset_align) or rebuild the
+                // Packed wrapper from it (reconstruct_packed). The two flags are
+                // mutually exclusive.
                 let inset_hash = typst_utils::hash128(&computed_inset);
                 let inset_arc = INSET_CACHE.with(|cache| {
                     cache
@@ -528,7 +605,7 @@ impl ResolvableCell for Packed<TableCell> {
                         .or_insert_with(|| Arc::new(computed_inset))
                         .clone()
                 });
-                (self.body.clone(), true, Some(inset_arc))
+                (self.body.clone(), !needs_packed, needs_packed, Some(inset_arc))
             };
 
         Cell {
@@ -542,6 +619,7 @@ impl ResolvableCell for Packed<TableCell> {
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
+            reconstruct_packed,
             source: Some(CellSource::Table { cell_x: x as u32, cell_y: y as u32, kind }),
             source_span,
         }
@@ -580,6 +658,9 @@ impl ResolvableCell for Packed<GridCell> {
         breakable: bool,
         styles: StyleChain,
         _: Smart<TableCellKind>,
+        // Grid cells always keep the eager Packed wrapper (grids construct
+        // Packed<GridCell> directly rather than via the BodyOnly lazy path).
+        _defer_packed: bool,
     ) -> Cell {
         // READ phase: all through Deref (immutable, no make_unique)
         let colspan = self.colspan.get(styles);
@@ -688,6 +769,7 @@ impl ResolvableCell for Packed<GridCell> {
             resolved_inset: cell_resolved_inset,
             resolved_align,
             apply_inset_align,
+            reconstruct_packed: false,
             source: Some(CellSource::Grid { cell_x: x as u32, cell_y: y as u32 }),
             source_span,
         }
@@ -843,6 +925,10 @@ pub trait ResolvableCell {
         breakable: bool,
         styles: StyleChain,
         kind: Smart<TableCellKind>,
+        // When true and a show rule targets the cell, store the raw body and
+        // rebuild the Packed wrapper on-the-fly at layout instead of storing it
+        // for the whole document. Only honored by table cells.
+        defer_packed: bool,
     ) -> Cell;
 
     /// Returns this cell's column override.
@@ -962,6 +1048,16 @@ pub struct Cell {
     /// resolved_inset/resolved_align. True when no user show rules exist
     /// (body is raw content, not wrapped in Packed<TableCell/GridCell>).
     pub apply_inset_align: bool,
+    /// Whether layout_cell should rebuild the `Packed<TableCell>` wrapper
+    /// on-the-fly from `body` (raw) + the resolved fields below, instead of
+    /// `body` already being the wrapped Packed. True when a user show rule
+    /// targets `table.cell` AND the table has no auto-sized columns (so each
+    /// cell is laid out ~once). This keeps the per-cell ~400-byte Packed
+    /// wrapper from being stored for all N cells simultaneously during
+    /// resolution — the single biggest peak-RAM driver for huge tables.
+    /// When set, `resolved_inset` holds the cell's computed inset and the
+    /// wrapper is rebuilt via [`reconstruct_table_cell_body`].
+    pub reconstruct_packed: bool,
     /// Where the cell came from (table or grid), with position info for tags.
     pub source: Option<CellSource>,
     /// The span of the original cell element (for locator/tracing).
@@ -987,6 +1083,7 @@ impl Cell {
             resolved_inset: None,
             resolved_align: Smart::Auto,
             apply_inset_align: false,
+            reconstruct_packed: false,
             source: None,
             source_span: Span::detached(),
         }
@@ -1540,6 +1637,17 @@ where
     INSET_CACHE.with(|cache| cache.borrow_mut().clear());
     FULL_STROKE_CACHE.with(|cache| cache.borrow_mut().clear());
 
+    // Defer the per-cell Packed<TableCell> wrapper to layout time when the
+    // output is paged and the table has no auto-sized columns. Auto columns
+    // would force `measure_auto_columns` to lay out every cell during column
+    // sizing (an O(N) whole-grid scan that would rebuild every deferred
+    // wrapper); without them, each cell is laid out ~once (or twice for an
+    // auto-row measure pass), so deferral trades a tiny per-layout rebuild for
+    // not holding ~400 B/cell across the whole document. See `Cell::reconstruct_packed`.
+    let defer_packed = styles.get(TargetElem::target) == Target::Paged
+        && !tracks.x.is_empty()
+        && tracks.x.iter().all(|sizing| !matches!(sizing, Sizing::Auto));
+
     CellGridResolver {
         tracks,
         gutter,
@@ -1550,6 +1658,7 @@ where
         engine,
         styles,
         span,
+        defer_packed,
     }
     .resolve(children)
 }
@@ -1564,6 +1673,9 @@ struct CellGridResolver<'a, 'b> {
     engine: &'a mut Engine<'b>,
     styles: StyleChain<'a>,
     span: Span,
+    /// Whether to store table cell bodies raw and rebuild the Packed wrapper
+    /// on-the-fly at layout (see `Cell::reconstruct_packed`).
+    defer_packed: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -2640,6 +2752,7 @@ impl CellGridResolver<'_, '_> {
             breakable,
             self.styles,
             kind,
+            self.defer_packed,
         ))
     }
 }

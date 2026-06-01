@@ -578,6 +578,7 @@ mod test {
             resolved_inset: None,
             resolved_align: Smart::Auto,
             apply_inset_align: false,
+            reconstruct_packed: false,
             source: None,
             source_span: Span::detached(),
         }
@@ -595,6 +596,7 @@ mod test {
             resolved_inset: None,
             resolved_align: Smart::Auto,
             apply_inset_align: false,
+            reconstruct_packed: false,
             source: None,
             source_span: Span::detached(),
         }

@@ -15,6 +15,7 @@ use typst_library::introspection::{
 };
 use typst_library::layout::grid::resolve::{
     Cell, CellSource, cached_grid_cellgrid, cached_table_cellgrid, cellgrid_by_key,
+    reconstruct_table_cell_body,
 };
 use typst_library::layout::{
     Fragment, Frame, FrameItem, FrameParent, GridElem, Inherit, Point, Regions, Sides,
@@ -76,14 +77,23 @@ pub fn layout_cell(
         None => {}
     }
 
-    let locator = locator.next(&cell.body.span());
+    // For a reconstruct_packed cell, `cell.body` is the raw body; the wrapper
+    // it stands in for was `.spanned(source_span)`, so disambiguate on the
+    // source span to match the eager-Packed path exactly.
+    let body_span =
+        if cell.reconstruct_packed { cell.source_span } else { cell.body.span() };
+    let locator = locator.next(&body_span);
 
-    // When apply_inset_align is set, the cell body is raw content without
-    // padded/aligned wrappers. Apply them on-the-fly here so they are
-    // short-lived (freed after layout_fragment returns) instead of being
-    // stored permanently in Cell.body for the entire document lifetime.
+    // The cell body may be stored raw (to avoid holding a per-cell wrapper for
+    // the whole document) and finalized on-the-fly here, short-lived:
+    //  * reconstruct_packed: rebuild the Packed<TableCell> wrapper (show rule
+    //    exists) from the resolved fields — byte-identical to the eager path.
+    //  * apply_inset_align: no show rule; just pad/align the raw body.
     let body;
-    let layout_body = if cell.apply_inset_align {
+    let layout_body = if cell.reconstruct_packed {
+        body = reconstruct_table_cell_body(cell);
+        &body
+    } else if cell.apply_inset_align {
         let mut b = cell.body.clone();
         let applied_inset = cell
             .resolved_inset
