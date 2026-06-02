@@ -1959,12 +1959,30 @@ impl<'a> GridLayouter<'a> {
         let mut y = start_y;
         let mut rows_collected = 0;
 
+        // Local cursor over upcoming headers. We SKIP header rows (they are
+        // laid out separately by the header machinery) but keep pre-computing
+        // the data rows past them. Without this, a header interleaved every
+        // group (e.g. grouped financial reports with a per-group label header)
+        // caps each parallel chunk at ~1 group worth of rows, starving the
+        // parallel cell layout and leaving most cores idle. Skipping headers
+        // here lets chunks reach the full MAX_CHUNK_ROWS across many groups.
+        let mut hdr = 0;
         while y < self.grid.rows.len() && rows_collected < MAX_CHUNK_ROWS {
-            // Stop at upcoming headers.
-            if let Some(next_header) = self.upcoming_headers.first()
-                && y >= next_header.range.start
-            {
-                break;
+            // Advance past / skip over any header rows at the current cursor.
+            let mut skipped_header = false;
+            while let Some(h) = self.upcoming_headers.get(hdr) {
+                if y >= h.range.end {
+                    hdr += 1; // already past this header
+                } else if y >= h.range.start {
+                    y = h.range.end; // inside header: skip its rows
+                    skipped_header = true;
+                    hdr += 1;
+                } else {
+                    break; // header is still ahead of the cursor
+                }
+            }
+            if skipped_header {
+                continue;
             }
             // Stop at repeated footers.
             if let Some(footer) = &self.grid.footer
