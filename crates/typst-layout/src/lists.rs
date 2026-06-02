@@ -107,22 +107,15 @@ pub fn layout_enum(
         let context = Context::new(None, Some(styles));
         let resolved = if full {
             parents.push(number);
-            let content = numbering
-                .apply(engine, context.track(), item.span(), &parents)?
-                .display();
+            let content = numbering.apply(engine, context.track(), &parents)?.display();
             parents.pop();
             content
         } else {
             match numbering {
-                Numbering::Pattern(pattern) => TextElem::packed(pattern.apply_kth(
-                    engine,
-                    item.span(),
-                    parents.len(),
-                    number,
-                )),
-                other => other
-                    .apply(engine, context.track(), item.span(), &[number])?
-                    .display(),
+                Numbering::Pattern(pattern) => {
+                    TextElem::packed(pattern.apply_kth(parents.len(), number))
+                }
+                other => other.apply(engine, context.track(), &[number])?.display(),
             }
         };
 

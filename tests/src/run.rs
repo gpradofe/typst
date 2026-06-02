@@ -4,7 +4,6 @@ use std::path::Path;
 use parking_lot::RwLock;
 use typst::diag::{SourceDiagnostic, SourceResult, Warned};
 use typst::foundations::{Content, Output, Repr};
-use typst::model::Document;
 use typst_bundle::Bundle;
 use typst_html::HtmlDocument;
 use typst_layout::PagedDocument;
@@ -166,6 +165,11 @@ impl<'a> Runner<'a> {
         // specified or required by paged outputs.
         if self.test.should_run(TestTarget::Paged) {
             let mut doc = self.compile::<PagedDocument>(evaluated.clone());
+            // Reload pages from disk if they were flushed during layout.
+            // Tests need all pages in memory for rendering and comparison.
+            if let Some(d) = &mut doc {
+                d.load_pages_from_store();
+            }
             let errors = custom::check(self.test, &self.world, doc.as_ref());
             if !errors.is_empty() {
                 log!(self, "custom check failed");
@@ -519,8 +523,14 @@ impl<'a> Runner<'a> {
                         #[cfg(target_family = "unix")]
                         std::os::unix::fs::symlink(&link_path, &live_path).unwrap();
                         #[cfg(target_family = "windows")]
-                        std::os::windows::fs::symlink_file(&link_path, &live_path)
-                            .unwrap();
+                        {
+                            // Try symlink first, fall back to copy if lacking privileges
+                            if std::os::windows::fs::symlink_file(&link_path, &live_path)
+                                .is_err()
+                            {
+                                std::fs::copy(&hash_path, &live_path).ok();
+                            }
+                        }
                     }
                 }
             }

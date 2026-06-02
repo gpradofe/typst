@@ -32,8 +32,21 @@ use typst_kit::server::HttpServer;
 
 /// Execute a compilation command.
 pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
+    // One-shot compile mode: disable closure-evaluation memoization.
+    // dhat profiling shows the closure cache reaches ~1 GB on heavy
+    // dispatch-style templates (per-cell `cell-of(row, key, fmt-fn)`)
+    // because each call inserts a unique slab entry that's never
+    // re-hit. `watch` mode leaves it on so incremental recompiles
+    // can still benefit from closure caching.
+    typst::engine_flags::disable_closure_memoize();
+
     let mut timer = Timer::new_or_placeholder(command.args.timings.clone());
     let mut config = CompileConfig::new(command)?;
+    if let Some(mode) = progress_mode(&command.args.progress, command.args.verbose) {
+        typst::progress::install(std::sync::Arc::new(crate::progress::CliSink::new(
+            mode,
+        )));
+    }
     let mut world = SystemWorld::new(
         Some(&command.args.input),
         &command.args.world,
@@ -41,6 +54,15 @@ pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
     )
     .map_err(|err| eco_format!("{err}"))?;
     timer.record(&mut world, |world| compile_once(world, &mut config))?
+}
+
+fn progress_mode(progress: &bool, verbose: bool) -> Option<crate::progress::Mode> {
+    match (*progress, verbose) {
+        (true, true) => Some(crate::progress::Mode::Both),
+        (true, false) => Some(crate::progress::Mode::Progress),
+        (false, true) => Some(crate::progress::Mode::Verbose),
+        (false, false) => None,
+    }
 }
 
 /// A preprocessed `CompileCommand`.
@@ -314,7 +336,22 @@ fn compile_and_export(
     match config.output_format {
         OutputFormat::Pdf | OutputFormat::Png | OutputFormat::Svg => {
             let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
-            let result = output.and_then(|document| export_paged(&document, config));
+            // Free cached file data (source text, JSON bytes, etc.) after
+            // compilation. PDF export doesn't need the world's file store.
+            // Saves ~37 MB for documents with large data files. Skipped when
+            // `--deps` is set because write_deps() needs the file-slot set to
+            // enumerate the compilation's dependencies.
+            if config.deps.is_none() {
+                world.clear_file_data();
+            }
+            if let Ok(doc) = &output {
+                let count = match doc.page_store() {
+                    Some(store) => store.page_count(),
+                    None => doc.pages().len(),
+                };
+                typst::progress::report(typst::progress::Event::Pages(count));
+            }
+            let result = output.and_then(|document| export_paged(document, config));
             Warned { output: result, warnings }
         }
         OutputFormat::Html => {
@@ -350,7 +387,7 @@ fn export_html(document: &HtmlDocument, config: &CompileConfig) -> SourceResult<
 
 /// Export to a paged target format.
 fn export_paged(
-    document: &PagedDocument,
+    document: PagedDocument,
     config: &CompileConfig,
 ) -> SourceResult<Vec<Output>> {
     match config.output_format {
@@ -358,25 +395,73 @@ fn export_paged(
             export_pdf(document, config).map(|()| vec![config.output.clone()])
         }
         OutputFormat::Png => {
-            export_image(document, config, ImageExportFormat::Png).at(Span::detached())
+            export_image(&document, config, ImageExportFormat::Png).at(Span::detached())
         }
         OutputFormat::Svg => {
-            export_image(document, config, ImageExportFormat::Svg).at(Span::detached())
+            export_image(&document, config, ImageExportFormat::Svg).at(Span::detached())
         }
         OutputFormat::Html | OutputFormat::Bundle => unreachable!(),
     }
 }
 
-/// Export to a PDF.
-fn export_pdf(document: &PagedDocument, config: &CompileConfig) -> SourceResult<()> {
+/// Export to a PDF. Takes ownership of the document so pages can be
+/// freed during conversion to reduce peak memory for large documents.
+/// Export to a PDF. Uses streaming disk-backed conversion for large documents
+/// (>100 pages):
+/// 1. Serializes pages to a temp file
+/// 2. Builds PDF tag tree while pages are still in memory
+fn export_pdf(mut document: PagedDocument, config: &CompileConfig) -> SourceResult<()> {
     let options = pdf_options(config);
-    let buffer = typst_pdf::pdf(document, &options)?;
-    config
-        .output
-        .write(&buffer)
-        .map_err(|err| eco_format!("failed to write PDF file ({err})"))
-        .at(Span::detached())?;
+
+    // Strip ALL heavy Content from the introspector except what PDF export
+    // actually queries. PDF export only queries HeadingElem (outline, named
+    // destinations) and AttachElem (file attachments). Everything else —
+    // TableElem, ParElem, StrongElem, EmphElem, GridElem, etc. — is never
+    // queried and keeps the Content tree alive via Arc refcounts.
+    // For a 100K-row table: ~500K ParElem entries alone keep ~72 MB alive.
+    document.strip_introspector_content(|c| {
+        !c.is::<typst::model::HeadingElem>() && !c.is::<typst::pdf::AttachElem>()
+    });
+
+    let has_store = document.page_store().is_some();
+    if has_store {
+        // Large document: pages were flushed to disk during layout.
+        // Use streaming PDF conversion — writes directly to file,
+        // avoiding a ~257 MB in-memory PDF buffer.
+        let mut store_arc = document.take_page_store().unwrap();
+        comemo::evict(0);
+        let store = std::sync::Arc::get_mut(&mut store_arc)
+            .expect("DiskPageStore should have single owner after take");
+        typst::engine_flags::compact_heap_and_trim_ws_full();
+        let writer = config
+            .output
+            .open()
+            .map_err(|err| eco_format!("failed to open output file ({err})"))
+            .at(Span::detached())?;
+        typst_pdf::pdf_streaming_to_writer(&mut document, &options, store, writer)?;
+        typst::progress::report(typst::progress::Event::Wrote {
+            bytes: output_size(&config.output),
+        });
+    } else {
+        let buffer = typst_pdf::pdf(document, &options)?;
+        config
+            .output
+            .write(&buffer)
+            .map_err(|err| eco_format!("failed to write PDF file ({err})"))
+            .at(Span::detached())?;
+        typst::progress::report(typst::progress::Event::Wrote {
+            bytes: buffer.len() as u64,
+        });
+    };
     Ok(())
+}
+
+fn output_size(output: &Output) -> u64 {
+    if let Output::Path(path) = output {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// Creates options for PDF export.

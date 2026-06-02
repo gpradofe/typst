@@ -5,7 +5,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.14.2"
-rust-version = "1.89" # also change in ci.yml
+rust-version = "1.92" # also change in ci.yml; bumped from 1.89: krilla/hayro need 1.92
 authors = ["The Typst Project Developers"]
 edition = "2024"
 homepage = "https://typst.app"
@@ -41,17 +41,20 @@ base64 = "0.22"
 bitflags = { version = "2", features = ["serde"] }
 bumpalo = { version = "3.15.4", features = ["boxed", "collections"] }
 bytemuck = "1"
+chinese-number = { version = "0.7.2", default-features = false, features = ["number-to-chinese"] }
 chrono = { version = "0.4.24", default-features = false, features = ["clock", "std"] }
 ciborium = "0.2.1"
 clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.2.1"
 clap_mangen = "0.2.10"
 codespan-reporting = "0.11"
-codex = { git = "https://github.com/typst/codex", rev = "0426b6a" }
+codex = { git = "https://github.com/typst/codex", rev = "231b9d5" }
 color-print = "0.3.6"
-comemo = "0.5.1"
+comemo = { git = "https://github.com/gpradofe/comemo.git", rev = "4ae924104ea99b41769d7be6f6c926164aa634d7" }
 csv = "1"
 ctrlc = "3.4.1"
+dhat = "0.3"
+bincode = "1.3"
 dirs = "6"
 ecow = { version = "0.2.6", features = ["serde"] }
 either = "1"
@@ -62,9 +65,9 @@ fontdb = { version = "0.23", default-features = false }
 fs_extra = "1.3"
 glidesort = "0.1.2"
 hayagriva = "0.9.1"
-hayro = { version = "0.4.0", default-features = false }
-hayro-svg = { version = "0.2.0", default-features = false }
-hayro-syntax = "0.4.0"
+hayro = { git = "https://github.com/LaurenzV/hayro", rev = "a1a5144", default-features = false }
+hayro-svg = { git = "https://github.com/LaurenzV/hayro", rev = "a1a5144", default-features = false }
+hayro-syntax = { git = "https://github.com/LaurenzV/hayro", rev = "a1a5144" }
 heck = "0.5"
 hypher = "0.1.4"
 icu_properties = { version = "1.4", features = ["serde"] }
@@ -77,8 +80,8 @@ indexmap = { version = "2", features = ["serde", "rayon"] }
 infer = { version = "0.19.0", default-features = false }
 itoa = "1"
 kamadak-exif = "0.6"
-krilla = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
-krilla-svg = { git = "https://github.com/LaurenzV/krilla", rev = "88483e2" }
+krilla = { git = "https://github.com/gpradofe/krilla.git", rev = "6bcead6bf8df5664dc32c271092ba6a0a4413a93", default-features = false, features = ["raster-images", "comemo", "rayon", "pdf"] }
+krilla-svg = { git = "https://github.com/gpradofe/krilla.git", rev = "6bcead6bf8df5664dc32c271092ba6a0a4413a93" }
 kurbo = "0.12"
 libfuzzer-sys = "0.4"
 libm = "0.2.11"
@@ -103,8 +106,8 @@ quote = "1"
 rayon = "1.7.0"
 regex = "1"
 regex-syntax = "0.8"
-resvg = { version = "0.45", default-features = false, features = ["raster-images"] }
-roxmltree = "0.20"
+resvg = { version = "0.47", default-features = false, features = ["raster-images"] }
+roxmltree = "0.21"
 rust_decimal = { version = "1.36.0", default-features = false, features = ["maths"] }
 rustc-hash = "2.1"
 rustybuzz = "0.20"
@@ -128,7 +131,7 @@ tempfile = "3.7.0"
 thin-vec = "0.2.13"
 time = { version = "0.3.20", features = ["formatting", "macros", "parsing"] }
 tiny_http = "0.12"
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 ttf-parser = "0.25.0"
 two-face = { version = "0.4.3", default-features = false, features = ["syntect-fancy"] }
@@ -143,7 +146,7 @@ unicode-segmentation = "1"
 unscanny = "0.1"
 ureq = { version = "2", default-features = false, features = ["native-tls", "gzip", "json"] }
 url = "2.5"
-usvg = { version = "0.45", default-features = false, features = ["text"] }
+usvg = { version = "0.47", default-features = false, features = ["text"] }
 utf8_iter = "1.0.4"
 walkdir = "2"
 wasmi = { version = "0.51.5", default-features = false, features = ["simd"] }
@@ -162,9 +165,10 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+debug = 1
 
 [profile.release.package."typst-cli"]
-strip = true
+strip = false
 
 [workspace.lints.clippy]
 blocks_in_conditions = "allow"
@@ -178,3 +182,17 @@ wildcard_in_or_patterns = "allow"
 # See https://github.com/typst/typst/pull/6560#issuecomment-3045393640
 derived_hash_with_manual_eq = "allow"
 disallowed_methods = "warn"
+
+# Unified cross-compilation config to prevent conflicting getrandom metadata
+[workspace.metadata.cross.target.x86_64-unknown-netbsd]
+pre-build = [
+    "mkdir -p /tmp/netbsd",
+    "curl -fO https://cdn.netbsd.org/pub/NetBSD/NetBSD-9.3/amd64/binary/sets/base.tar.xz",
+    "tar -C /tmp/netbsd -xJf base.tar.xz",
+    "cp /tmp/netbsd/usr/lib/libexecinfo.so /usr/local/x86_64-unknown-netbsd/lib",
+    "rm base.tar.xz",
+    "rm -rf /tmp/netbsd",
+]
+
+[patch.crates-io]
+comemo = { git = "https://github.com/gpradofe/comemo.git", rev = "4ae924104ea99b41769d7be6f6c926164aa634d7" }

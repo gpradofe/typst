@@ -580,7 +580,7 @@ impl Eval for ast::Closure<'_> {
 }
 
 /// Call the function in the context with the arguments.
-#[comemo::memoize]
+#[comemo::memoize(enabled = !typst_library::engine_flags::is_closure_memoize_disabled())]
 #[allow(clippy::too_many_arguments)]
 pub fn eval_closure(
     func: &Func,

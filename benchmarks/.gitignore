@@ -1,0 +1,10 @@
+# Generated test data (regenerated on first run)
+data/*.json
+
+# Downloaded original 0.14.2 binary (downloaded on first run)
+bin/
+
+# Per-run scratch PDFs and result JSONs
+_bench_*.pdf
+benchmark_results.json
+__pycache__/

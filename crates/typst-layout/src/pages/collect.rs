@@ -136,7 +136,7 @@ fn migrate_unterminated_tags(children: &mut [Pair], mid: usize) -> usize {
     let excluded: FxHashSet<_> = children[start..mid]
         .iter()
         .filter_map(|(c, _)| match c.to_packed::<TagElem>()?.tag {
-            Tag::Start(..) => None,
+            Tag::Start(..) | Tag::CellStart(..) => None,
             Tag::End(loc, ..) => Some(loc),
         })
         .collect();

@@ -210,7 +210,7 @@ fn write_virtual_fs(root: &Path, fs: &VirtualFs) {
 
 /// Exports a document to PDF and writes it to disk.
 fn export_pdf(document: &PagedDocument, config: &Config) -> SourceResult<()> {
-    let data = typst_pdf::pdf(document, &typst_pdf::PdfOptions::default())?;
+    let data = typst_pdf::pdf(document.clone(), &typst_pdf::PdfOptions::default())?;
     if let Some(path) = &config.output {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();

@@ -105,6 +105,13 @@ impl SystemWorld {
         self.now.reset();
     }
 
+    /// Clear all cached file data (sources and bytes). Use after compilation
+    /// is complete to free memory before export. Files will be re-read from
+    /// disk if accessed again.
+    pub fn clear_file_data(&mut self) {
+        self.files.clear_file_data();
+    }
+
     /// Forcibly scan fonts instead of doing it lazily upon the first access.
     ///
     /// Does nothing if the fonts were already scanned.

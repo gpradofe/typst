@@ -11,10 +11,10 @@ use crate::diag::{At, HintedStrResult, HintedString, SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
     Array, CastInfo, Content, Context, Fold, FromValue, Func, IntoValue, Packed, Reflect,
-    Resolve, Smart, StyleChain, Synthesize, Value, cast, elem, scope,
+    Resolve, Smart, StyleChain, Synthesize, Target, TargetElem, Value, cast, elem, scope,
 };
 use crate::introspection::Tagged;
-use crate::layout::resolve::{CellGrid, grid_to_cellgrid};
+use crate::layout::resolve::{CellGrid, GridMeta, cached_grid_cellgrid};
 use crate::layout::{
     Alignment, Length, OuterHAlignment, OuterVAlignment, Rel, Sides, Sizing,
 };
@@ -412,6 +412,11 @@ pub struct GridElem {
     #[synthesized]
     pub grid: Arc<CellGrid>,
 
+    /// Compact metadata for PDF tagging (no Content bodies).
+    #[internal]
+    #[synthesized]
+    pub grid_meta: Arc<GridMeta>,
+
     /// The contents of the grid cells, plus any extra grid lines specified with
     /// the @grid.hline and @grid.vline elements.
     ///
@@ -444,8 +449,18 @@ impl Synthesize for Packed<GridElem> {
         engine: &mut Engine,
         styles: StyleChain,
     ) -> SourceResult<()> {
-        let grid = grid_to_cellgrid(self, engine, styles)?;
-        self.grid = Some(Arc::new(grid));
+        let grid = cached_grid_cellgrid(self, engine, styles)?;
+        if styles.get(TargetElem::target) == Target::Paged {
+            let meta = GridMeta::from_cellgrid(&grid);
+            self.grid_meta = Some(Arc::new(meta));
+            // For very large grids, also store the grid Arc to prevent duplicate
+            // CellGrid creation in layout (different style hash → cache miss).
+            if grid.entries.len() >= 10_000 {
+                self.grid = Some(grid);
+            }
+        } else {
+            self.grid = Some(grid);
+        }
         Ok(())
     }
 }
@@ -593,6 +608,20 @@ pub struct GridHeader {
     /// header).
     #[default(NonZeroU32::ONE)]
     pub level: NonZeroU32,
+
+    /// If `true`, this header does NOT appear on the first page where the
+    /// grid starts; it only appears when the grid continues to subsequent
+    /// pages.
+    ///
+    /// Useful for "continuation" content like "(Cont.)" suffixes or repeated
+    /// column labels that should appear only on continuation pages but would
+    /// be redundant on the first page where the grid begins. Combine with a
+    /// separate `header(repeat: false)` to render distinct first-page-only
+    /// and continuation-only content without consulting the introspector.
+    ///
+    /// Has no effect when `repeat` is `false`.
+    #[default(false)]
+    pub skip_first_page: bool,
 
     /// The cells and lines within the header.
     #[variadic]

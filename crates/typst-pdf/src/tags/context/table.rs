@@ -3,34 +3,41 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
-use az::SaturatingAs;
+use ecow::EcoString;
 use krilla::tagging as kt;
 use krilla::tagging::{NaiveRgbColor, Tag, TagKind};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use typst_library::foundations::Packed;
-use typst_library::layout::resolve::{CellGrid, Line, LinePosition};
+use typst_library::foundations::{Packed, Smart};
+use typst_library::layout::resolve::{GridMeta, Line, LinePosition};
 use typst_library::layout::{Abs, Sides};
-use typst_library::model::{TableCell, TableElem};
+use typst_library::model::TableElem;
 use typst_library::pdf::{TableCellKind, TableHeaderScope};
 use typst_library::visualize::{FixedStroke, Stroke};
 
 use crate::tags::GroupId;
 use crate::tags::context::grid::{CtxCell, GridCells, GridEntry, GridExt};
 use crate::tags::context::{TableId, TagId};
+use crate::tags::groups::CellInfo;
 use crate::tags::tree::Tree;
-use crate::tags::util::{self, PropertyOptRef, PropertyValCopied, TableHeaderScopeExt};
+use crate::tags::util::{self, PropertyOptRef, TableHeaderScopeExt};
 use crate::util::{AbsExt, SidesExt};
 
 #[derive(Debug)]
 pub struct TableCtx {
     pub group_id: GroupId,
     pub table_id: TableId,
-    pub elem: Packed<TableElem>,
+    /// Grid metadata extracted from the table element. Stored separately
+    /// so we can drop the heavy `Packed<TableElem>` reference early,
+    /// freeing the Content tree (~912 MB for 100K-row tables).
+    grid_meta: Arc<GridMeta>,
+    /// Table summary for accessibility, extracted from the table element.
+    summary: Option<EcoString>,
     row_kinds: Vec<TableCellKind>,
     cells: GridCells<TableCellData>,
     border_thickness: Option<f32>,
     border_color: Option<NaiveRgbColor>,
+    border_style: Option<kt::BorderStyle>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +45,6 @@ pub struct TableCellData {
     tag: TagId,
     kind: TableCellKind,
     headers: SmallVec<[kt::TagId; 1]>,
-    stroke: Sides<PrioritzedStroke>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -56,15 +62,16 @@ pub enum StrokePriority {
 
 impl TableCtx {
     pub fn new(group_id: GroupId, table_id: TableId, table: Packed<TableElem>) -> Self {
-        let grid = table.grid.as_ref().unwrap();
-        let width = grid.non_gutter_column_count();
-        let height = grid.non_gutter_row_count();
+        let grid_meta = table.grid_meta.as_ref().unwrap().clone();
+        let summary = table.summary.opt_ref().cloned();
+        let width = grid_meta.non_gutter_column_count();
+        let height = grid_meta.non_gutter_row_count();
 
         // Generate the default row kinds.
-        let mut grid_headers = grid.headers.iter().peekable();
+        let mut grid_headers = grid_meta.headers.iter().peekable();
         let default_row_kinds = (0..height as u32)
             .map(|y| {
-                let grid_y = grid.to_effective(y);
+                let grid_y = grid_meta.to_effective(y);
 
                 // Find current header
                 while grid_headers.next_if(|h| h.range.end <= grid_y).is_some() {}
@@ -74,7 +81,7 @@ impl TableCtx {
                     return TableCellKind::Header(header.level, TableHeaderScope::Column);
                 }
 
-                if let Some(footer) = &grid.footer
+                if let Some(footer) = &grid_meta.footer
                     && footer.range().contains(&grid_y)
                 {
                     return TableCellKind::Footer;
@@ -84,54 +91,76 @@ impl TableCtx {
             })
             .collect::<Vec<_>>();
 
+        // Drop the heavy Packed<TableElem> — we've extracted what we need.
+        // This releases the reference to the table element Content, which
+        // in turn holds references to all ~100K cell Content objects.
+        drop(table);
+
         Self {
             group_id,
             table_id,
-            elem: table,
+            grid_meta,
+            summary,
             row_kinds: default_row_kinds,
             cells: GridCells::new(width, height),
             border_thickness: None,
             border_color: None,
+            border_style: None,
         }
     }
 
-    pub fn insert(&mut self, cell: &Packed<TableCell>, tag: TagId, id: GroupId) {
-        let x = cell.x.val().unwrap_or_else(|| unreachable!()).saturating_as();
-        let y = cell.y.val().unwrap_or_else(|| unreachable!()).saturating_as();
-        let rowspan = cell.rowspan.val();
-        let colspan = cell.colspan.val();
-        let grid = self.elem.grid.as_deref().unwrap();
+    pub fn insert(&mut self, info: &CellInfo, tag: TagId, id: GroupId) {
+        let x: u32 = info.x();
+        let y: u32 = info.y();
+        let rowspan = info.rowspan();
+        let colspan = info.colspan();
 
-        let kind = cell.kind.val().unwrap_or(self.row_kinds[y as usize]);
+        let kind = info
+            .kind()
+            .and_then(|k| match k {
+                Smart::Custom(k) => Some(k),
+                Smart::Auto => None,
+            })
+            .unwrap_or(self.row_kinds[y as usize]);
 
-        let [grid_x, grid_y] = [x, y].map(|i| grid.to_effective(i));
-        let grid_cell = grid.cell(grid_x, grid_y).unwrap();
-        let stroke = grid_cell.stroke.clone().zip(grid_cell.stroke_overridden).map(
-            |(stroke, overridden)| {
-                let priority = if overridden {
-                    StrokePriority::CellStroke
-                } else {
-                    StrokePriority::GridStroke
-                };
-                PrioritzedStroke { stroke, priority }
-            },
-        );
         self.cells.insert(CtxCell {
-            data: TableCellData { tag, kind, headers: SmallVec::new(), stroke },
+            data: TableCellData { tag, kind, headers: SmallVec::new() },
             x,
             y,
-            rowspan: rowspan.try_into().unwrap_or(NonZeroU32::MAX),
-            colspan: colspan.try_into().unwrap_or(NonZeroU32::MAX),
+            rowspan: NonZeroU32::new(rowspan).unwrap_or(NonZeroU32::MIN),
+            colspan: NonZeroU32::new(colspan).unwrap_or(NonZeroU32::MIN),
             id,
         });
     }
 
     pub fn build_tag(&self) -> TagKind {
         Tag::Table
-            .with_summary(self.elem.summary.opt_ref().map(Into::into))
+            .with_summary(self.summary.as_ref().map(Into::into))
             .with_border_thickness(self.border_thickness.map(kt::Sides::uniform))
             .with_border_color(self.border_color.map(kt::Sides::uniform))
+            .with_border_style(self.border_style.map(kt::Sides::uniform))
             .into()
+    }
+
+    /// Free the heavy cells grid after `build_table` has extracted all
+    /// needed data into Groups/TagStorage. Only `build_tag()` is needed
+    /// after this, which uses summary/border fields.
+    pub fn free_cells(&mut self) {
+        self.cells.clear();
+        self.row_kinds = Vec::new();
+        // Drop the Arc<GridMeta> reference — no longer needed after build_table.
+        // For 100K-row tables this frees ~40 MB if this was the last reference.
+        self.grid_meta = Arc::new(GridMeta {
+            entries: Vec::new(),
+            unique_strokes: Vec::new(),
+            content_cols: 0,
+            content_rows: 0,
+            has_gutter: false,
+            headers: Vec::new(),
+            footer: None,
+            hlines: Vec::new(),
+            vlines: Vec::new(),
+        });
     }
 }
 
@@ -154,7 +183,7 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
 
     let width = table_ctx.cells.width();
     let height = table_ctx.cells.height();
-    let grid = table_ctx.elem.grid.as_deref().unwrap();
+    let grid = &*table_ctx.grid_meta;
 
     // Only generate row groups such as `THead`, `TFoot`, and `TBody` if
     // there are no rows with mixed cell kinds, and there is at least one
@@ -238,53 +267,67 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
         }
     }
 
-    // Place h-lines, overwriting the cells stroke.
-    place_explicit_lines(
-        &mut table_ctx.cells,
+    // Build stroke grid from GridMeta. Strokes are NOT stored per-cell in
+    // TableCellData to keep GridEntry small (~64 bytes vs ~128 bytes), saving
+    // ~68 MB for 100K-row tables. The stroke grid is temporary — alive only
+    // during build_table.
+    let mut stroke_grid = StrokeGrid::from_grid(grid, &table_ctx.cells, width, height);
+
+    // Place h-lines, overwriting strokes.
+    // h-lines: block_idx = y (row), inline_idx = x (column)
+    place_explicit_lines_on_grid(
+        &mut stroke_grid,
+        &table_ctx.cells,
         &grid.hlines,
         height,
         width,
-        |cells, (y, x), pos| {
-            let cell = cells.cell_mut(x, y)?;
-            Some(match pos {
-                LinePosition::Before => &mut cell.data.stroke.bottom,
-                LinePosition::After => &mut cell.data.stroke.top,
-            })
+        |block, inline| (inline, block), // (y, x) → (x, y)
+        |stroke, pos| match pos {
+            LinePosition::Before => &mut stroke.bottom,
+            LinePosition::After => &mut stroke.top,
         },
     );
-    // Place v-lines, overwriting the cells stroke.
-    place_explicit_lines(
-        &mut table_ctx.cells,
+    // Place v-lines, overwriting strokes.
+    // v-lines: block_idx = x (column), inline_idx = y (row)
+    place_explicit_lines_on_grid(
+        &mut stroke_grid,
+        &table_ctx.cells,
         &grid.vlines,
         width,
         height,
-        |cells, (x, y), pos| {
-            let cell = cells.cell_mut(x, y)?;
-            Some(match pos {
-                LinePosition::Before => &mut cell.data.stroke.right,
-                LinePosition::After => &mut cell.data.stroke.left,
-            })
+        |block, inline| (block, inline), // (x, y) → (x, y)
+        |stroke, pos| match pos {
+            LinePosition::Before => &mut stroke.right,
+            LinePosition::After => &mut stroke.left,
         },
     );
 
     // Remove overlapping border strokes between cells.
     for y in 0..height {
         for x in 0..width.saturating_sub(1) {
-            prioritize_strokes(&mut table_ctx.cells, (x, y), (x + 1, y), |a, b| {
-                (&mut a.stroke.right, &mut b.stroke.left)
-            });
+            prioritize_grid_strokes(
+                &mut stroke_grid,
+                &table_ctx.cells,
+                (x, y),
+                (x + 1, y),
+                |a, b| (&mut a.right, &mut b.left),
+            );
         }
     }
     for x in 0..width {
         for y in 0..height.saturating_sub(1) {
-            prioritize_strokes(&mut table_ctx.cells, (x, y), (x, y + 1), |a, b| {
-                (&mut a.stroke.bottom, &mut b.stroke.top)
-            });
+            prioritize_grid_strokes(
+                &mut stroke_grid,
+                &table_ctx.cells,
+                (x, y),
+                (x, y + 1),
+                |a, b| (&mut a.bottom, &mut b.top),
+            );
         }
     }
 
-    (table_ctx.border_thickness, table_ctx.border_color) =
-        try_resolve_table_stroke(&table_ctx.cells);
+    (table_ctx.border_thickness, table_ctx.border_color, table_ctx.border_style) =
+        try_resolve_table_stroke_from_grid(&stroke_grid, &table_ctx.cells);
 
     let mut chunk_kind = table_ctx.row_kinds[0];
     let mut chunk_id = GroupId::INVALID;
@@ -334,12 +377,14 @@ pub fn build_table(tree: &mut Tree, table_id: TableId) {
                         .into(),
                 };
 
+                let cell_stroke = stroke_grid.get(cell.x, cell.y);
                 resolve_cell_border_and_background(
                     grid,
                     table_ctx.border_thickness,
                     table_ctx.border_color,
+                    table_ctx.border_style,
                     [cell.x, cell.y],
-                    &cell.data.stroke,
+                    cell_stroke,
                     &mut tag,
                 );
 
@@ -457,18 +502,82 @@ fn table_cell_id(table_id: TableId, x: u32, y: u32) -> kt::TagId {
     kt::TagId::from(buf)
 }
 
-fn place_explicit_lines<F>(
-    cells: &mut GridCells<TableCellData>,
+/// Temporary stroke grid built from GridMeta at the start of build_table.
+/// Keeps strokes out of TableCellData, reducing GridEntry from ~128 to ~64
+/// bytes and saving ~68 MB for 100K-row tables.
+struct StrokeGrid {
+    strokes: Vec<Sides<PrioritzedStroke>>,
+    width: usize,
+}
+
+impl StrokeGrid {
+    /// Build the stroke grid from GridMeta for all cells in the table.
+    fn from_grid(
+        grid: &GridMeta,
+        cells: &GridCells<TableCellData>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let w = width as usize;
+        let default = Sides::splat(PrioritzedStroke {
+            stroke: None,
+            priority: StrokePriority::GridStroke,
+        });
+        let mut strokes = vec![default; w * height as usize];
+
+        for cell in cells.iter().filter_map(GridEntry::as_cell) {
+            let [grid_x, grid_y] = [cell.x, cell.y].map(|i| grid.to_effective(i));
+            if let Some(grid_cell) = grid.cell(grid_x, grid_y) {
+                let pattern = grid.stroke_pattern(grid_cell);
+                let stroke = pattern.stroke.clone().zip(pattern.stroke_overridden).map(
+                    |(stroke, overridden)| {
+                        let priority = if overridden {
+                            StrokePriority::CellStroke
+                        } else {
+                            StrokePriority::GridStroke
+                        };
+                        PrioritzedStroke { stroke, priority }
+                    },
+                );
+                strokes[cell.y as usize * w + cell.x as usize] = stroke;
+            }
+        }
+
+        Self { strokes, width: w }
+    }
+
+    fn get(&self, x: u32, y: u32) -> &Sides<PrioritzedStroke> {
+        &self.strokes[y as usize * self.width + x as usize]
+    }
+
+    fn get_mut(&mut self, x: u32, y: u32) -> &mut Sides<PrioritzedStroke> {
+        &mut self.strokes[y as usize * self.width + x as usize]
+    }
+
+    /// Resolve a position through the cells grid (handling Spanned entries)
+    /// and return the parent cell's stroke.
+    fn resolve_mut<'a>(
+        &'a mut self,
+        cells: &GridCells<TableCellData>,
+        x: u32,
+        y: u32,
+    ) -> Option<&'a mut Sides<PrioritzedStroke>> {
+        let cell = cells.resolve_at(x, y)?;
+        Some(self.get_mut(cell.x, cell.y))
+    }
+}
+
+fn place_explicit_lines_on_grid<F, G>(
+    stroke_grid: &mut StrokeGrid,
+    cells: &GridCells<TableCellData>,
     lines: &[Vec<Line>],
     block_end: u32,
     inline_end: u32,
+    to_xy: G,
     get_side: F,
 ) where
-    F: Fn(
-        &mut GridCells<TableCellData>,
-        (u32, u32),
-        LinePosition,
-    ) -> Option<&mut PrioritzedStroke>,
+    F: Fn(&mut Sides<PrioritzedStroke>, LinePosition) -> &mut PrioritzedStroke,
+    G: Fn(u32, u32) -> (u32, u32),
 {
     for line in lines.iter().flat_map(|lines| lines.iter()) {
         let end = line.end.map(|n| n.get() as u32).unwrap_or(inline_end).min(inline_end);
@@ -490,7 +599,9 @@ fn place_explicit_lines<F>(
             LinePosition::After => line.index as u32,
         };
         for inline_idx in line.start as u32..end {
-            if let Some(side) = get_side(cells, (block_idx, inline_idx), pos) {
+            let (x, y) = to_xy(block_idx, inline_idx);
+            if let Some(cell_stroke) = stroke_grid.resolve_mut(cells, x, y) {
+                let side = get_side(cell_stroke, pos);
                 *side = explicit_stroke();
             }
         }
@@ -501,28 +612,47 @@ fn place_explicit_lines<F>(
 /// that aren't equal. Leave strokes that would overlap but are the same
 /// because then only a single value has to be written for `BorderStyle`,
 /// `BorderThickness`, and `BorderColor` instead of an array for each.
-fn prioritize_strokes<F>(
-    cells: &mut GridCells<TableCellData>,
+fn prioritize_grid_strokes<F>(
+    stroke_grid: &mut StrokeGrid,
+    cells: &GridCells<TableCellData>,
     a: (u32, u32),
     b: (u32, u32),
     get_sides: F,
 ) where
     F: for<'a> Fn(
-        &'a mut TableCellData,
-        &'a mut TableCellData,
+        &'a mut Sides<PrioritzedStroke>,
+        &'a mut Sides<PrioritzedStroke>,
     ) -> (&'a mut PrioritzedStroke, &'a mut PrioritzedStroke),
 {
-    let Some([a, b]) = cells.cells_disjoint_mut([a, b]) else { return };
+    // Resolve both positions to parent cells.
+    let Some(cell_a) = cells.resolve_at(a.0, a.1) else { return };
+    let Some(cell_b) = cells.resolve_at(b.0, b.1) else { return };
 
-    let (a, b) = get_sides(&mut a.data, &mut b.data);
+    let idx_a = cell_a.y as usize * stroke_grid.width + cell_a.x as usize;
+    let idx_b = cell_b.y as usize * stroke_grid.width + cell_b.x as usize;
+
+    if idx_a == idx_b {
+        return; // Same parent cell (spanned), no conflict.
+    }
+
+    // Borrow disjoint entries from the strokes Vec.
+    let (sa, sb) = if idx_a < idx_b {
+        let (left, right) = stroke_grid.strokes.split_at_mut(idx_b);
+        (&mut left[idx_a], &mut right[0])
+    } else {
+        let (left, right) = stroke_grid.strokes.split_at_mut(idx_a);
+        (&mut right[0], &mut left[idx_b])
+    };
+
+    let (a_side, b_side) = get_sides(sa, sb);
 
     // Only remove contesting (different) edge strokes.
-    if a.stroke != b.stroke {
+    if a_side.stroke != b_side.stroke {
         // Prefer the right stroke on same priorities.
-        if a.priority <= b.priority {
-            a.stroke = b.stroke.clone();
+        if a_side.priority <= b_side.priority {
+            a_side.stroke = b_side.stroke.clone();
         } else {
-            b.stroke = a.stroke.clone();
+            b_side.stroke = a_side.stroke.clone();
         }
     }
 }
@@ -530,13 +660,15 @@ fn prioritize_strokes<F>(
 /// Try to resolve a table border stroke color and thickness that is inherited
 /// by the cells. In Acrobat cells cannot override the border thickness or color
 /// of the outer border around the table if the thickness is set.
-fn try_resolve_table_stroke(
+fn try_resolve_table_stroke_from_grid(
+    stroke_grid: &StrokeGrid,
     cells: &GridCells<TableCellData>,
-) -> (Option<f32>, Option<NaiveRgbColor>) {
+) -> (Option<f32>, Option<NaiveRgbColor>, Option<kt::BorderStyle>) {
     // Omitted strokes are counted too for reasons explained above.
     let mut strokes = FxHashMap::<_, usize>::default();
     for cell in cells.iter().filter_map(GridEntry::as_cell) {
-        for stroke in cell.data.stroke.iter() {
+        let cell_stroke = stroke_grid.get(cell.x, cell.y);
+        for stroke in cell_stroke.iter() {
             *strokes.entry(stroke.stroke.as_ref()).or_default() += 1;
         }
     }
@@ -548,19 +680,24 @@ fn try_resolve_table_stroke(
         let s = (**s?).clone();
         Some(s.unwrap_or_default())
     });
-    let Some(stroke) = stroke else { return (None, None) };
+    let Some(stroke) = stroke else { return (None, None, None) };
 
-    // Only set a parent stroke width if the table uses one uniform stroke.
+    // Only set parent stroke attributes if the table uses one uniform stroke.
     let thickness = uniform_stroke.then_some(stroke.thickness.to_f32());
+    let style = uniform_stroke.then_some(match stroke.dash {
+        Some(_) => kt::BorderStyle::Dashed,
+        None => kt::BorderStyle::Solid,
+    });
     let color = util::paint_to_color(&stroke.paint);
 
-    (thickness, color)
+    (thickness, color, style)
 }
 
 fn resolve_cell_border_and_background(
-    grid: &CellGrid,
+    grid: &GridMeta,
     parent_border_thickness: Option<f32>,
     parent_border_color: Option<NaiveRgbColor>,
+    parent_border_style: Option<kt::BorderStyle>,
     pos: [u32; 2],
     stroke: &Sides<PrioritzedStroke>,
     tag: &mut TagKind,
@@ -572,13 +709,15 @@ fn resolve_cell_border_and_background(
 
     // Acrobat completely ignores the border style attribute, but the spec
     // defines `BorderStyle::None` as the default. So make sure to write
-    // the correct border styles.
-    let border_style = resolve_sides(&fixed, None, Some(kt::BorderStyle::None), |s| {
-        s.map(|s| match s.dash {
-            Some(_) => kt::BorderStyle::Dashed,
-            None => kt::BorderStyle::Solid,
-        })
-    });
+    // the correct border styles. When a parent border_style is set (uniform
+    // tables), cells that match inherit it → no per-cell attribute needed.
+    let border_style =
+        resolve_sides(&fixed, parent_border_style, Some(kt::BorderStyle::None), |s| {
+            s.map(|s| match s.dash {
+                Some(_) => kt::BorderStyle::Dashed,
+                None => kt::BorderStyle::Solid,
+            })
+        });
 
     // In Acrobat `BorderThickness` takes precedence over `BorderStyle`. If
     // A `BorderThickness != 0` is specified for a side the border is drawn
@@ -599,7 +738,8 @@ fn resolve_cell_border_and_background(
 
     let [grid_x, grid_y] = pos.map(|i| grid.to_effective(i));
     let grid_cell = grid.cell(grid_x, grid_y).unwrap();
-    let background_color = grid_cell.fill.as_ref().and_then(util::paint_to_color);
+    let background_color =
+        grid_cell.fill_rgb.map(|[r, g, b]| NaiveRgbColor::new(r, g, b));
     tag.set_background_color(background_color);
 }
 

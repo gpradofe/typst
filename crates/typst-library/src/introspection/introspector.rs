@@ -6,7 +6,7 @@ use std::sync::RwLock;
 
 use comemo::{Track, Tracked};
 use ecow::{EcoString, EcoVec};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use typst_syntax::VirtualPath;
 
@@ -315,14 +315,6 @@ impl<P> ElementIntrospector<P> {
                         Err(i) => i,
                     };
 
-                    // If the ancestor is fully contained in one of the list
-                    // elements, we exclude the list element from both the start
-                    // and end, leading to `end < start``.
-                    if end_in_list < start_in_list {
-                        debug_assert_eq!(end_in_list + 1, start_in_list);
-                        continue;
-                    }
-
                     // Clamp at `visited` to ensure we don't yield elements
                     // twice.
                     let start_in_list = start_in_list.max(visited);
@@ -474,13 +466,30 @@ impl<P> ElementIntrospector<P> {
             .cloned()
             .unwrap_or(usize::MAX..usize::MAX)
     }
+
+    /// Replace Content entries matching `predicate` with empty Content,
+    /// freeing heavy subtrees (like TableElem.children with 100K cells).
+    /// Position data and location mappings are preserved.
+    pub fn strip_content(&mut self, mut predicate: impl FnMut(&Content) -> bool) {
+        let empty = Content::default();
+        for (content, _) in &mut self.elems {
+            if predicate(content) {
+                *content = empty.clone();
+            }
+        }
+        // Invalidate query cache since content changed.
+        self.queries = QueryCache::default();
+    }
 }
 
 /// Constructs the [`ElementIntrospector`].
 pub struct ElementIntrospectorBuilder<P> {
     stack: Vec<Vec<BuilderItem<P>>>,
     sink: Vec<BuilderItem<P>>,
-    seen: FxHashSet<Location>,
+    /// Tracks seen locations. Value is `true` if a Start entry was pushed
+    /// to sink (regular element), `false` if only marked as seen
+    /// (CellStart — no sink entry, so the matching End is skipped).
+    seen: FxHashMap<Location, bool>,
     insertions: MultiMap<Location, Vec<BuilderItem<P>>>,
     keys: MultiMap<u128, Location>,
     locations: FxHashMap<Location, Range<usize>>,
@@ -489,8 +498,9 @@ pub struct ElementIntrospectorBuilder<P> {
 
 /// An item in the builder's sink.
 enum BuilderItem<P> {
-    /// Indicates the start of the given element. Also holds its position.
-    Start(Content, P),
+    /// Indicates the start of the given element. Also holds its location and
+    /// position.
+    Start(Content, Location, P),
     /// Indicates the end of the element with the given location.
     End(Location),
 }
@@ -498,13 +508,24 @@ enum BuilderItem<P> {
 impl<P> ElementIntrospectorBuilder<P> {
     /// Creates an empty builder.
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// Creates a builder with pre-allocated capacity for the estimated
+    /// number of introspectable elements. Reduces memory waste from
+    /// HashMap/HashSet/Vec growth doubling.
+    pub fn with_capacity(hint: usize) -> Self {
+        let mut seen = FxHashMap::default();
+        seen.reserve(hint);
+        let mut locations = FxHashMap::default();
+        locations.reserve(hint);
         Self {
             stack: Vec::new(),
-            sink: Vec::new(),
-            seen: FxHashSet::default(),
+            sink: Vec::with_capacity(hint.saturating_mul(2)),
+            seen,
             insertions: MultiMap::default(),
             keys: MultiMap::default(),
-            locations: FxHashMap::default(),
+            locations,
             labels: MultiMap::default(),
         }
     }
@@ -512,16 +533,28 @@ impl<P> ElementIntrospectorBuilder<P> {
     /// Discovers an introspectible in a tag.
     pub fn discover_tag(&mut self, tag: &Tag, position: P) {
         match tag {
-            Tag::Start(elem, flags) => {
+            Tag::Start(elem, loc, flags) => {
                 if flags.introspectable {
-                    let loc = elem.location().unwrap();
-                    if self.seen.insert(loc) {
-                        self.sink.push(BuilderItem::Start(elem.clone(), position));
+                    let loc = *loc;
+                    use std::collections::hash_map::Entry;
+                    if let Entry::Vacant(e) = self.seen.entry(loc) {
+                        e.insert(true);
+                        self.sink.push(BuilderItem::Start(elem.clone(), loc, position));
                     }
                 }
             }
-            Tag::End(loc, key, flags) => {
+            Tag::CellStart(_meta, loc, flags) => {
+                // CellStart tags are introspectable like Start tags, but
+                // they have no Content to store. We skip them in the
+                // introspector since cells are not queried by location.
+                // However, we still record the location as seen.
                 if flags.introspectable {
+                    let loc = *loc;
+                    self.seen.entry(loc).or_insert(false);
+                }
+            }
+            Tag::End(loc, key, flags) => {
+                if flags.introspectable && self.seen.get(loc) == Some(&true) {
                     self.keys.insert(*key, *loc);
                     self.sink.push(BuilderItem::End(*loc));
                 }
@@ -543,10 +576,12 @@ impl<P> ElementIntrospectorBuilder<P> {
         let mut queued = MultiMap::default();
         for (i, (elem, q)) in elements.elems.iter().enumerate() {
             let loc = elem.location().unwrap();
-            if self.seen.insert(loc) {
+            use std::collections::hash_map::Entry;
+            if let Entry::Vacant(e) = self.seen.entry(loc) {
+                e.insert(true);
                 let range = elements.locations.get(&loc).unwrap();
                 let position = map_position(q);
-                self.sink.push(BuilderItem::Start(elem.clone(), position));
+                self.sink.push(BuilderItem::Start(elem.clone(), loc, position));
                 debug_assert_eq!(range.start, i);
                 queued.insert(range.end, loc);
             }
@@ -576,10 +611,14 @@ impl<P> ElementIntrospectorBuilder<P> {
     /// Builds a complete introspector with all acceleration structures from a
     /// list of top-level pairs.
     pub fn finalize(mut self) -> ElementIntrospector<P> {
-        self.locations.reserve(self.seen.len());
+        // Use sink length as capacity hint: each element has a Start entry
+        // in the sink, so sink.len()/2 is a better estimate than seen.len()
+        // (which includes CellStart locations that don't become elements).
+        let elem_hint = self.sink.len() / 2;
+        self.locations.reserve(elem_hint);
 
         // Save all pairs and their descendants in the correct order.
-        let mut elems = Vec::with_capacity(self.seen.len());
+        let mut elems = Vec::with_capacity(elem_hint);
         for item in std::mem::take(&mut self.sink) {
             self.visit(&mut elems, item);
         }
@@ -597,8 +636,7 @@ impl<P> ElementIntrospectorBuilder<P> {
     /// acceleration structures.
     fn visit(&mut self, elems: &mut Vec<(Content, P)>, item: BuilderItem<P>) {
         match item {
-            BuilderItem::Start(elem, pos) => {
-                let loc = elem.location().unwrap();
+            BuilderItem::Start(elem, loc, pos) => {
                 let idx = elems.len();
 
                 // Populate the location acceleration map. Initially, we insert
